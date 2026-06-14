@@ -67,27 +67,33 @@ public class SqlFilterBuilderTests
         Assert.Equal("(contains(lower(\"Prompt\"), lower($p0)))", f.WhereClause);
     }
 
-    // --- List columns: element membership -----------------------------------------------------------
+    // --- List columns: case-insensitive substring against each element ------------------------------
 
     [Fact]
-    public void ListAny_BuildsHasAny()
+    public void ListAny_BuildsPerElementContainsOr()
     {
         SqlFilter f = Build("p[tags=a,b]", ("tags", ColumnKind.List));
-        Assert.Equal("list_has_any(\"tags\", list_value($p0, $p1))", f.WhereClause);
+        Assert.Equal(
+            "(len(list_filter(\"tags\", x -> contains(lower(x), lower($p0)))) > 0 OR len(list_filter(\"tags\", x -> contains(lower(x), lower($p1)))) > 0)",
+            f.WhereClause);
     }
 
     [Fact]
-    public void ListAll_BuildsHasAll()
+    public void ListAll_BuildsPerElementContainsAnd()
     {
         SqlFilter f = Build("p[tags==a,b]", ("tags", ColumnKind.List));
-        Assert.Equal("list_has_all(\"tags\", list_value($p0, $p1))", f.WhereClause);
+        Assert.Equal(
+            "(len(list_filter(\"tags\", x -> contains(lower(x), lower($p0)))) > 0 AND len(list_filter(\"tags\", x -> contains(lower(x), lower($p1)))) > 0)",
+            f.WhereClause);
     }
 
     [Fact]
-    public void ListNone_BuildsNotHasAny()
+    public void ListNone_BuildsNotPerElementContains()
     {
         SqlFilter f = Build("p[tags!=nsfw]", ("tags", ColumnKind.List));
-        Assert.Equal("NOT list_has_any(\"tags\", list_value($p0))", f.WhereClause);
+        Assert.Equal(
+            "NOT (len(list_filter(\"tags\", x -> contains(lower(x), lower($p0)))) > 0)",
+            f.WhereClause);
     }
 
     // --- Mixed / general ----------------------------------------------------------------------------
@@ -100,7 +106,7 @@ public class SqlFilterBuilderTests
             ("tags", ColumnKind.List),
             ("source", ColumnKind.Scalar));
         Assert.Equal(
-            "list_has_any(\"tags\", list_value($p0, $p1)) AND (contains(lower(\"source\"), lower($p2)))",
+            "(len(list_filter(\"tags\", x -> contains(lower(x), lower($p0)))) > 0 OR len(list_filter(\"tags\", x -> contains(lower(x), lower($p1)))) > 0) AND (contains(lower(\"source\"), lower($p2)))",
             f.WhereClause);
         Assert.Equal(new[] { "a", "b", "civitai" }, f.Parameters.Select(p => p.Value));
     }
@@ -148,7 +154,7 @@ public class SqlFilterBuilderTests
     {
         SqlFilter f = BuildWithTags("p[tags=1girl]", ["bar", "baz"], ("bar", ColumnKind.Scalar), ("baz", ColumnKind.List));
         Assert.Equal(
-            "((contains(lower(\"bar\"), lower($p0)) OR list_has_any(\"baz\", list_value($p0))))",
+            "((contains(lower(\"bar\"), lower($p0)) OR len(list_filter(\"baz\", x -> contains(lower(x), lower($p0)))) > 0))",
             f.WhereClause);
     }
 
@@ -157,7 +163,9 @@ public class SqlFilterBuilderTests
     {
         // With no tag columns configured, `tags` behaves as a literal column name (today's behavior).
         SqlFilter f = BuildWithTags("p[tags=a,b]", [], ("tags", ColumnKind.List));
-        Assert.Equal("list_has_any(\"tags\", list_value($p0, $p1))", f.WhereClause);
+        Assert.Equal(
+            "(len(list_filter(\"tags\", x -> contains(lower(x), lower($p0)))) > 0 OR len(list_filter(\"tags\", x -> contains(lower(x), lower($p1)))) > 0)",
+            f.WhereClause);
     }
 
     [Fact]
@@ -170,7 +178,7 @@ public class SqlFilterBuilderTests
     public void ColumnLookup_IsCaseInsensitive_QuotesCanonicalName()
     {
         SqlFilter f = Build("p[TAGS=a]", ("tags", ColumnKind.List));
-        Assert.Equal("list_has_any(\"tags\", list_value($p0))", f.WhereClause);
+        Assert.Equal("(len(list_filter(\"tags\", x -> contains(lower(x), lower($p0)))) > 0)", f.WhereClause);
     }
 
     [Fact]

@@ -85,7 +85,7 @@ Stack filters with `;` to require all of them at once:
 ### Good to know
 
 - **Matching is "contains," not exact.** `prompt=girl` finds every entry whose prompt *contains* "girl" — exact matching would defeat the point of a wildcard. Capitalization is ignored.
-- Columns that hold a **list of tags** are matched tag-by-tag (so `tags=punk` won't match "cyberpunk"); plain text columns are matched by "contains."
+- Columns that hold a **list of tags** are matched tag-by-tag, but each tag is still "contains" — so `tags=girl` matches the tags `girls` and `young girl` (and, yes, `tags=punk` also matches `cyberpunk`). Plain text columns are matched by "contains" too.
 - Values can include spaces (`long hair`), but these characters are reserved and can't appear inside a value: `; , = ! [ ] < >`
 - Need several picks at once? SwarmUI's built-in count works: `<wc[3]:prompts>` gives 3 different entries.
 
