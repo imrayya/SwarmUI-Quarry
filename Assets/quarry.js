@@ -2,6 +2,8 @@
 (() => {
   // frontend/settings.ts
   var MESSAGE_TIMEOUT_MS = 5e3;
+  var HIGHLIGHT_DEBOUNCE_MS = 250;
+  var PROMPT_BOX_IDS = ["alt_prompt_textbox", "alt_negativeprompt_textbox"];
   var PREVIEW_ROW_LIMIT = 100;
   var PREVIEW_MODAL_ID = "quarry-preview-modal";
   var PREVIEW_TITLE_ID = "quarry-preview-title";
@@ -25,19 +27,26 @@
     return `<label class="quarry-tag-option"><input type="checkbox" class="quarry-dataset-tag" data-dataset="${escapeHtml(dataset.name)}" value="${escapeHtml(col.name)}"${checked}> ${escapeHtml(col.name)}${badge}</label>`;
   }).join("");
   var formatRowCount = (count) => count == null ? "—" : count.toLocaleString();
+  var applyInPromptHighlights = (container, names) => {
+    const wanted = new Set(names.map((n) => n.toLowerCase()));
+    container.querySelectorAll("tr.quarry-dataset-row").forEach((row) => {
+      const name = (row.getAttribute("data-dataset") ?? "").toLowerCase();
+      row.classList.toggle("quarry-dataset-in-prompt", wanted.has(name));
+    });
+  };
   var renderDatasetRow = (dataset) => {
     const name = escapeHtml(dataset.name);
     if (dataset.error) {
-      return `<tr class="quarry-dataset-row quarry-dataset-error">
+      return `<tr class="quarry-dataset-row quarry-dataset-error" data-dataset="${name}">
             <td><code class="quarry-dataset-name">${name}</code></td>
             <td colspan="4"><span class="quarry-dataset-error-msg">⚠️ ${escapeHtml(dataset.error)}</span></td>
         </tr>`;
     }
-    return `<tr class="quarry-dataset-row">
+    return `<tr class="quarry-dataset-row" data-dataset="${name}">
         <td><code class="quarry-dataset-name">${name}</code></td>
         <td><select class="quarry-dataset-column" data-dataset="${name}">${renderDatasetOptions(dataset)}</select></td>
         <td class="quarry-dataset-tags" title="Columns the 'tags' keyword searches across">${renderTagCheckboxes(dataset)}</td>
-        <td class="quarry-dataset-rows" title="${formatRowCount(dataset.rowCount)} rows">${formatRowCount(dataset.rowCount)}</td>
+        <td class="quarry-dataset-rows" title="${formatRowCount(dataset.rowCount)} rows with a non-empty prompt (usable picks)">${formatRowCount(dataset.rowCount)}</td>
         <td><button type="button" class="basic-button quarry-preview-button" data-dataset="${name}" title="Preview the first ${PREVIEW_ROW_LIMIT} rows">👁 Preview</button></td>
     </tr>`;
   };
@@ -137,6 +146,39 @@
     return result;
   };
   var messageTimer = null;
+  var highlightTimer = null;
+  var readPromptText = () => PROMPT_BOX_IDS.map(
+    (id) => document.getElementById(id)?.value ?? ""
+  ).join("\n");
+  var updateInPromptHighlights = () => {
+    const container = document.getElementById("quarry-datasets");
+    if (!container) {
+      return;
+    }
+    const prompt = readPromptText();
+    if (!/<(?:wc|wildcard)/i.test(prompt)) {
+      applyInPromptHighlights(container, []);
+      return;
+    }
+    genericRequest(
+      "QuarryResolveReferences",
+      { prompt },
+      (data) => {
+        if (data.success) {
+          applyInPromptHighlights(container, data.names ?? []);
+        }
+      }
+    );
+  };
+  var scheduleHighlightUpdate = () => {
+    if (highlightTimer) {
+      clearTimeout(highlightTimer);
+    }
+    highlightTimer = setTimeout(
+      updateInPromptHighlights,
+      HIGHLIGHT_DEBOUNCE_MS
+    );
+  };
   var applyResponse = (data) => {
     const enabledEl = document.getElementById(
       "quarry-enabled"
@@ -160,6 +202,7 @@
     const datasetsEl = document.getElementById("quarry-datasets");
     if (datasetsEl) {
       datasetsEl.innerHTML = renderDatasets(data.datasets ?? []);
+      updateInPromptHighlights();
     }
   };
   var showMessage = (message, type) => {
@@ -324,6 +367,9 @@
         openPreview(dataset);
       }
     });
+    for (const id of PROMPT_BOX_IDS) {
+      document.getElementById(id)?.addEventListener("input", scheduleHighlightUpdate);
+    }
   };
   var quarry = {
     init

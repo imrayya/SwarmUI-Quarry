@@ -60,6 +60,12 @@
     background: var(--background-gray);
 }
 
+/* Flagged when the dataset is referenced by a wc/wildcard tag in the current prompt. */
+.quarry-dataset-row.quarry-dataset-in-prompt {
+    background: color-mix(in srgb, var(--green) 16%, transparent);
+    box-shadow: inset 3px 0 0 var(--green);
+}
+
 .quarry-dataset-name {
     font-weight: 600;
     overflow-wrap: anywhere;

@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using FreneticUtilities.FreneticExtensions;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
@@ -65,6 +66,47 @@ public static class WildcardHandler
             Logs.Error($"Quarry: error processing '{data}': {ex.ReadableString()}");
             return "";
         }
+    }
+
+    /// <summary>Matches a <c>&lt;wildcard:...&gt;</c> / <c>&lt;wc:...&gt;</c> reference tag (optional <c>[n]</c> /
+    /// <c>[n-m]</c> count, like core), capturing the inner <c>NAME[query]</c> data. Reserved chars <c>&lt; &gt;</c>
+    /// can't appear in a value, so stopping at the first <c>&gt;</c> is safe.</summary>
+    private static readonly Regex ReferenceTagRegex =
+        new(@"<(?:wildcard|wc)(?:\[\d+(?:-\d+)?\])?:([^>]*)>", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>Returns the distinct wildcard names of every dataset this extension would serve for the
+    /// <c>wc</c>/<c>wildcard</c> references in <paramref name="prompt"/>, resolved with the exact same name
+    /// handling as real expansion (comma lists, globs, fuzzy match) so the settings UI can flag precisely what
+    /// would be used. Filters are ignored — only the NAME part matters. Never throws: an unparseable or
+    /// non-matching tag is skipped.</summary>
+    public static IReadOnlyList<string> ResolveReferencedDatasetNames(string prompt)
+    {
+        List<string> names = [];
+        if (string.IsNullOrEmpty(prompt))
+        {
+            return names;
+        }
+        HashSet<string> seen = [];
+        foreach (Match match in ReferenceTagRegex.Matches(prompt))
+        {
+            WildcardQuery query;
+            try
+            {
+                query = WildcardQueryParser.Parse(match.Groups[1].Value);
+            }
+            catch (WildcardQueryException)
+            {
+                continue;
+            }
+            foreach (DatasetEntry entry in ResolveTargets(query.Name))
+            {
+                if (seen.Add(entry.WildcardName.ToLowerFast()))
+                {
+                    names.Add(entry.WildcardName);
+                }
+            }
+        }
+        return names;
     }
 
     /// <summary>Resolves a reference NAME to the datasets it targets. A NAME may be a comma-separated list and

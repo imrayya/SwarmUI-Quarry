@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@jest/globals";
 import {
+    applyInPromptHighlights,
     collectPromptColumns,
     collectTagColumns,
     escapeHtml,
@@ -280,5 +281,38 @@ describe("collectTagColumns", () => {
         const container = document.createElement("div");
         container.innerHTML = `<label><input type="checkbox" class="quarry-dataset-tag" value="x" checked></label>`;
         expect(collectTagColumns(container)).toEqual({});
+    });
+});
+
+describe("applyInPromptHighlights", () => {
+    const makeTable = (...names: string[]): HTMLElement => {
+        const container = document.createElement("div");
+        // Mirrors renderDatasetRow's <tr> shape; that the real markup carries data-dataset is covered by the
+        // renderDatasets tests, so here we focus purely on the highlight toggling.
+        container.innerHTML = `<table><tbody>${names
+            .map(
+                (name) =>
+                    `<tr class="quarry-dataset-row" data-dataset="${name}"><td>${name}</td></tr>`,
+            )
+            .join("")}</tbody></table>`;
+        return container;
+    };
+
+    const highlighted = (container: HTMLElement): string[] =>
+        Array.from(container.querySelectorAll(".quarry-dataset-in-prompt")).map(
+            (row) => row.getAttribute("data-dataset") ?? "",
+        );
+
+    it("flags only the referenced rows, case-insensitively", () => {
+        const container = makeTable("prompts/a", "prompts/b", "prompts/c");
+        applyInPromptHighlights(container, ["PROMPTS/A", "prompts/c"]);
+        expect(highlighted(container)).toEqual(["prompts/a", "prompts/c"]);
+    });
+
+    it("clears flags when given an empty list", () => {
+        const container = makeTable("prompts/a", "prompts/b");
+        applyInPromptHighlights(container, ["prompts/a"]);
+        applyInPromptHighlights(container, []);
+        expect(highlighted(container)).toEqual([]);
     });
 });

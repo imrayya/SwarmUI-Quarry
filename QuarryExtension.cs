@@ -26,6 +26,7 @@ public class QuarryExtension : Extension
         API.RegisterAPICall(QuarrySaveSettings, true, Permissions.FundamentalGenerateTabAccess);
         API.RegisterAPICall(QuarryRefresh, true, Permissions.FundamentalGenerateTabAccess);
         API.RegisterAPICall(QuarryPreviewDataset, false, Permissions.FundamentalGenerateTabAccess);
+        API.RegisterAPICall(QuarryResolveReferences, false, Permissions.FundamentalGenerateTabAccess);
 
         string status = DatasetManager.IsActive ? $"enabled, folder: {DatasetManager.DatasetsFolder}" : "disabled";
         Logs.Info($"Quarry extension initialized ({status}).");
@@ -230,6 +231,23 @@ public class QuarryExtension : Extension
             ["dataset"] = dataset,
             ["columns"] = columnsArr,
             ["rows"] = rowsArr,
+        });
+    }
+
+    /// <summary>Given the current prompt text, returns the wildcard names of the Quarry datasets it references,
+    /// so the settings UI can flag in-use files. Uses the same resolution as real expansion (comma lists, globs,
+    /// fuzzy match); filters in the reference are ignored.</summary>
+    public Task<JObject> QuarryResolveReferences(Session session, string prompt)
+    {
+        JArray names = [];
+        foreach (string name in WildcardHandler.ResolveReferencedDatasetNames(prompt ?? ""))
+        {
+            names.Add(name);
+        }
+        return Task.FromResult(new JObject
+        {
+            ["success"] = true,
+            ["names"] = names,
         });
     }
     #endregion
