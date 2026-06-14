@@ -186,7 +186,12 @@ public static class WildcardHandler
         // No configured tag columns (or a single-column prompt file) → the prompt column doubles as the tag
         // column, so `[tags=…]` still works without any per-file setup.
         List<ColumnInfo> tagColumns = TagColumnResolver.Resolve(DatasetManager.GetConfiguredTagColumns(entry.WildcardName), schema, promptColumn);
-        SqlFilter filter = SqlFilterBuilder.Build(query, schema, tagColumns);
+        // Exclude rows whose prompt column is empty/whitespace so blanks are never pooled or picked. The same
+        // filter object is used for both CountRows here and GetPromptAt later, so the pool size and the OFFSET
+        // fetch stay aligned. The blank-result logging in ProcessTargets remains as a backstop.
+        SqlFilter filter = SqlFilterBuilder.And(
+            SqlFilterBuilder.Build(query, schema, tagColumns),
+            SqlFilterBuilder.NonEmptyPrompt(promptColumn));
         long count = DatasetManager.Backend.CountRows(entry.Path, filter);
         return new MatchedDataset(entry, promptColumn, filter, count);
     }

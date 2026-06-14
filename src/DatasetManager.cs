@@ -25,7 +25,7 @@ public static class DatasetManager
     // key = wildcard name lowercased
     private static readonly ConcurrentDictionary<string, DatasetEntry> Datasets = new();
     private static readonly ConcurrentDictionary<string, (string Hash, ColumnSchema Schema)> SchemaCache = new();
-    private static readonly ConcurrentDictionary<string, (string Hash, long Count)> RowCountCache = new();
+    private static readonly ConcurrentDictionary<string, (string Hash, string PromptColumn, long Count)> RowCountCache = new();
     private static readonly Dictionary<string, string> PromptColumns = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, List<string>> TagColumns = new(StringComparer.OrdinalIgnoreCase);
     private static readonly object PromptColumnsLock = new();
@@ -152,16 +152,24 @@ public static class DatasetManager
         return schema;
     }
 
-    /// <summary>Returns the dataset's total (unfiltered) row count, cached until the underlying file changes.</summary>
-    public static long GetRowCount(DatasetEntry entry)
+    /// <summary>Returns the number of rows whose <paramref name="promptColumn"/> is non-empty — i.e. the rows
+    /// this dataset can actually contribute as wildcard picks — so the UI count matches what a query yields and
+    /// never includes blank rows. Cached until the underlying file OR the resolved prompt column changes (the
+    /// column choice affects the count, but not the file hash). A null/empty prompt column (a dataset with no
+    /// readable columns) falls back to the raw total.</summary>
+    public static long GetRowCount(DatasetEntry entry, string promptColumn)
     {
         string key = entry.WildcardName.ToLowerFast();
-        if (RowCountCache.TryGetValue(key, out (string Hash, long Count) cached) && cached.Hash == entry.FileHash)
+        if (RowCountCache.TryGetValue(key, out (string Hash, string PromptColumn, long Count) cached)
+            && cached.Hash == entry.FileHash && cached.PromptColumn == promptColumn)
         {
             return cached.Count;
         }
-        long count = Backend.CountRows(entry.Path, SqlFilter.None);
-        RowCountCache[key] = (entry.FileHash, count);
+        SqlFilter filter = string.IsNullOrEmpty(promptColumn)
+            ? SqlFilter.None
+            : SqlFilterBuilder.NonEmptyPrompt(promptColumn);
+        long count = Backend.CountRows(entry.Path, filter);
+        RowCountCache[key] = (entry.FileHash, promptColumn, count);
         return count;
     }
 
@@ -178,7 +186,7 @@ public static class DatasetManager
                 long? rowCount = null;
                 try
                 {
-                    rowCount = GetRowCount(entry);
+                    rowCount = GetRowCount(entry, resolved);
                 }
                 catch
                 {
@@ -257,7 +265,7 @@ public static class DatasetManager
                 {
                     SchemaCache.TryRemove(key, out _);
                 }
-                if (RowCountCache.TryGetValue(key, out (string Hash, long Count) cachedCount) && cachedCount.Hash != hash)
+                if (RowCountCache.TryGetValue(key, out (string Hash, string PromptColumn, long Count) cachedCount) && cachedCount.Hash != hash)
                 {
                     RowCountCache.TryRemove(key, out _);
                 }
@@ -338,8 +346,8 @@ public static class DatasetManager
 }
 
 /// <summary>Settings-UI view of one dataset: its columns, the resolved prompt column (what would be used
-/// now), the explicitly configured column (if any), the total row count (null when unknown), and an error
-/// message if the schema couldn't be read.</summary>
+/// now), the explicitly configured column (if any), the count of rows with a non-empty prompt — i.e. usable
+/// picks (null when unknown), and an error message if the schema couldn't be read.</summary>
 public sealed record DatasetInfo(
     string Name,
     IReadOnlyList<ColumnInfo> Columns,
