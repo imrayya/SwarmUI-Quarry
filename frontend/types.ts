@@ -20,6 +20,9 @@ export interface DatasetDto {
 export interface SettingsResponse {
     success: boolean;
     datasetsFolder?: string;
+    // When true, clicking a dataset name appends it to the prompt's first existing `<q:...>` tag instead of
+    // inserting a separate one. Persisted server-side (Quarry.json) and saved via the Save Settings button.
+    addToExistingTag?: boolean;
     active?: boolean;
     // False when Quarry's runtime requirement (the DuckDB lance extension) isn't installed yet; the UI then
     // shows only the install gate. Omitted/true once it's available.

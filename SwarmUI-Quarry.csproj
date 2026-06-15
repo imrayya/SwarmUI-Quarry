@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <AssemblyName>SwarmUI-QuarryExtension</AssemblyName>
+    <AssemblyName>SwarmUI-Quarry</AssemblyName>
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>annotations</Nullable>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
@@ -34,7 +34,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <InternalsVisibleTo Include="SwarmUI-QuarryExtension.Tests" />
+    <InternalsVisibleTo Include="SwarmUI-Quarry.Tests" />
   </ItemGroup>
 
   <!-- DuckDB query engine, pulled from NuGet. SwarmUI builds every extension with `dotnet build`

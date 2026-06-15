@@ -30,6 +30,11 @@ public static class DatasetManager
     // cache hit for the real request.
     public const int DefaultPreviewLimit = 100;
 
+    // Ceiling for a single preview, grown by the modal's "Load more" (which adds 500 rows per click). Bounds
+    // both the persisted sample (the whole cache file is rewritten on each preview) and the rendered table,
+    // while sitting well above any realistic "peek at more rows".
+    public const int MaxPreviewLimit = 10000;
+
     private static DuckDbQueryBackend _backend;
 
     public static DuckDbQueryBackend Backend => _backend ??= new DuckDbQueryBackend();
@@ -242,6 +247,20 @@ public static class DatasetManager
         {
             return (false, null, null, ex.Message);
         }
+    }
+
+    // Drops one dataset's cached preview sample (e.g. after the user grew it with "Load more") so the next
+    // preview reloads the default first page. Returns false for an unknown dataset.
+    public static bool ClearPreviewCache(string wildcardName)
+    {
+        DatasetEntry entry = Resolve(wildcardName);
+        if (entry is null)
+        {
+            return false;
+        }
+        DatasetCache.ClearPreview(entry.WildcardName.ToLowerFast());
+        DatasetCache.PersistIfDirty();
+        return true;
     }
 
     public static int WarmAll()

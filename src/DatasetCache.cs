@@ -42,7 +42,14 @@ public static class DatasetCache
 
     private static string CacheFilePath => Path.Combine(CacheFolder, "datasets.json");
 
-    public sealed record PreviewData(int Limit, List<string> Columns, List<List<string>> Rows);
+    public sealed record PreviewData(int Limit, List<string> Columns, List<List<string>> Rows)
+    {
+        // Whether this cached sample can serve a request for `limit` rows: it already holds at least that many,
+        // or it holds the whole dataset (the fetch at `Limit` came back short, so there are no more rows). Lets
+        // a 100-row preview open serve a previously loaded-more 600-row sample, while a still-larger "Load more"
+        // request misses and re-fetches to grow it.
+        public bool Satisfies(int limit) => Rows.Count >= limit || Rows.Count < Limit;
+    }
 
     // One file's hash-keyed results: any subset may be present (filled in lazily); the whole entry is
     // invalidated together when the file's hash changes.
@@ -82,7 +89,7 @@ public static class DatasetCache
     public static bool TryGetPreview(string key, string hash, int limit, out PreviewData preview)
     {
         if (Cache.TryGetValue(key, out CacheEntry cached) && cached.Hash == hash
-            && cached.Preview is not null && cached.Preview.Limit == limit)
+            && cached.Preview is not null && cached.Preview.Satisfies(limit))
         {
             preview = cached.Preview;
             return true;
@@ -98,7 +105,7 @@ public static class DatasetCache
     {
         if (!Cache.TryGetValue(key, out CacheEntry cached) || cached.Hash != hash
             || cached.Schema is null || !cached.HasRowCount
-            || cached.Preview is null || cached.Preview.Limit != limit)
+            || cached.Preview is null || !cached.Preview.Satisfies(limit))
         {
             return false;
         }
@@ -179,6 +186,20 @@ public static class DatasetCache
         if (Cache.TryRemove(key, out _))
         {
             _cacheDirty = true;
+        }
+    }
+
+    // Drops just one dataset's cached preview sample (keeping its schema/row-count), so the next preview
+    // reloads the default first page. Backs the modal's per-dataset "Clear cache" button.
+    public static void ClearPreview(string key)
+    {
+        lock (CacheLock)
+        {
+            if (Cache.TryGetValue(key, out CacheEntry cached) && cached.Preview is not null)
+            {
+                Cache[key] = cached with { Preview = null };
+                _cacheDirty = true;
+            }
         }
     }
 

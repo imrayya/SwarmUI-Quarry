@@ -52,12 +52,103 @@
       document.getElementById(id)?.addEventListener("input", schedule);
     }
   };
-  var matchQuarryTag = (prompt, name) => {
-    const matcher = new RegExp(
-      `<(q(?:\\[\\d+(?:-\\d+)?\\])?):${regexEscape(name)}>`,
-      "g"
-    );
-    return prompt.match(matcher);
+  var addToExistingTag = false;
+  var setAddToExistingTag = (value) => {
+    addToExistingTag = value;
+  };
+  var Q_TAG_PATTERN = "<(q(?:\\[\\d+(?:-\\d+)?\\])?):([^>]*)>";
+  var splitTagInner = (inner) => {
+    const bracket = inner.indexOf("[");
+    const namesPart = bracket < 0 ? inner : inner.slice(0, bracket);
+    const filter = bracket < 0 ? "" : inner.slice(bracket);
+    const names = namesPart.split(",").map((part) => part.trim()).filter((part) => part.length > 0);
+    return { names, filter };
+  };
+  var findQuarryTags = (value) => {
+    const regex = new RegExp(Q_TAG_PATTERN, "gi");
+    const tags = [];
+    let match = regex.exec(value);
+    while (match !== null) {
+      const { names, filter } = splitTagInner(match[2]);
+      tags.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        keyword: match[1],
+        names,
+        filter
+      });
+      match = regex.exec(value);
+    }
+    return tags;
+  };
+  var buildTag = (tag, names) => `<${tag.keyword}:${names.join(",")}${tag.filter}>`;
+  var trimSpacesOnly = (text) => text.replace(/^ +| +$/g, "");
+  var removeDatasetFromValue = (value, name) => {
+    const lower = name.toLowerCase();
+    for (const tag of findQuarryTags(value)) {
+      const index = tag.names.findIndex((n) => n.toLowerCase() === lower);
+      if (index < 0) {
+        continue;
+      }
+      const remaining = tag.names.filter((_, i) => i !== index);
+      if (remaining.length > 0) {
+        const rebuilt = buildTag(tag, remaining);
+        return {
+          value: value.slice(0, tag.start) + rebuilt + value.slice(tag.end),
+          cursor: tag.start + rebuilt.length
+        };
+      }
+      const before = value.slice(0, tag.start).replace(/ +$/, "");
+      const after = value.slice(tag.end).replace(/^ +/, "");
+      const joiner = before.length > 0 && after.length > 0 ? " " : "";
+      return { value: before + joiner + after, cursor: before.length };
+    }
+    return null;
+  };
+  var addDatasetToFirstTag = (value, name) => {
+    const [target] = findQuarryTags(value);
+    if (!target) {
+      return null;
+    }
+    const rebuilt = buildTag(target, [...target.names, name]);
+    return {
+      value: value.slice(0, target.start) + rebuilt + value.slice(target.end),
+      cursor: target.start + rebuilt.length
+    };
+  };
+  var insertNewTag = (value, cursorPos, name) => {
+    const tag = `<q:${name}>`;
+    const prefix = trimSpacesOnly(value.slice(0, cursorPos));
+    const suffix = trimSpacesOnly(value.slice(cursorPos));
+    if (prefix.length > 0 && suffix.length > 0) {
+      return {
+        value: `${prefix} ${tag} ${suffix}`,
+        cursor: prefix.length + 1 + tag.length
+      };
+    }
+    if (prefix.length > 0) {
+      return {
+        value: `${prefix} ${tag}`,
+        cursor: prefix.length + 1 + tag.length
+      };
+    }
+    if (suffix.length > 0) {
+      return { value: `${tag} ${suffix}`, cursor: tag.length };
+    }
+    return { value: tag, cursor: tag.length };
+  };
+  var computePromptEdit = (value, cursorPos, name, addToExisting) => {
+    const removed = removeDatasetFromValue(value, name);
+    if (removed) {
+      return removed;
+    }
+    if (addToExisting) {
+      const combined = addDatasetToFirstTag(value, name);
+      if (combined) {
+        return combined;
+      }
+    }
+    return insertNewTag(value, cursorPos, name);
   };
   var insertQuarryTag = (name) => {
     let [promptBox, cursorPos] = uiImprover.getLastSelectedTextbox();
@@ -67,23 +158,15 @@
       );
       cursorPos = promptBox.value.length;
     }
-    const prefix = promptBox.value.substring(0, cursorPos);
-    const suffix = promptBox.value.substring(cursorPos);
-    const trimmed = trimSpaces(prefix);
-    const match = matchQuarryTag(trimmed, name);
-    if (match && match.length > 0) {
-      const last = match[match.length - 1];
-      if (trimmed.endsWith(trimSpaces(last))) {
-        promptBox.value = `${trimSpaces(trimmed.substring(0, trimmed.length - last.length))} ${suffix}`.trim();
-        triggerChangeFor(promptBox);
-        recomputeReferences();
-        return;
-      }
-    }
-    const tag = `<q:${name}>`;
-    promptBox.value = `${trimSpaces(prefix)} ${tag} ${trimSpaces(suffix)}`.trim();
-    promptBox.selectionStart = cursorPos + tag.length + 1;
-    promptBox.selectionEnd = cursorPos + tag.length + 1;
+    const edit = computePromptEdit(
+      promptBox.value,
+      cursorPos,
+      name,
+      addToExistingTag
+    );
+    promptBox.value = edit.value;
+    promptBox.selectionStart = edit.cursor;
+    promptBox.selectionEnd = edit.cursor;
     promptBox.focus();
     triggerChangeFor(promptBox);
     recomputeReferences();
@@ -496,9 +579,14 @@
   // frontend/settings.ts
   var MESSAGE_TIMEOUT_MS = 5e3;
   var PREVIEW_ROW_LIMIT = 100;
+  var PREVIEW_LOAD_MORE_COUNT = 500;
+  var ADD_TO_EXISTING_TAG_ID = "quarry-add-to-existing-tag";
   var PREVIEW_MODAL_ID = "quarry-preview-modal";
   var PREVIEW_TITLE_ID = "quarry-preview-title";
   var PREVIEW_BODY_ID = "quarry-preview-body";
+  var PREVIEW_STATUS_ID = "quarry-preview-status";
+  var PREVIEW_LOAD_MORE_ID = "quarry-preview-loadmore";
+  var PREVIEW_CLEAR_ID = "quarry-preview-clear";
   var renderDatasetOptions = (dataset) => dataset.columns.map((col) => {
     const selected = col.name === dataset.resolvedPromptColumn ? " selected" : "";
     const badge = col.kind === "list" ? " [list]" : "";
@@ -533,7 +621,7 @@
         <td><select class="quarry-dataset-column" data-dataset="${name}">${renderDatasetOptions(dataset)}</select></td>
         <td class="quarry-dataset-tags" title="Columns the 'tags' keyword searches across">${renderTagCheckboxes(dataset)}</td>
         <td class="quarry-dataset-rows" data-dataset="${name}" title="Rows in the dataset (loads when you preview it if not already counted)">${formatRowCount(dataset.rowCount)}</td>
-        <td><button type="button" class="basic-button quarry-preview-button" data-dataset="${name}" title="Preview the first ${PREVIEW_ROW_LIMIT} rows">Preview</button></td>
+        <td><button type="button" class="basic-button quarry-preview-button" data-dataset="${name}" title="Preview this dataset's rows (load more in the dialog)">Preview</button></td>
     </tr>`;
   };
   var renderDatasets = (datasets) => {
@@ -567,6 +655,7 @@
         <tbody>${body}</tbody>
     </table>`;
   };
+  var renderPreviewStatus = (shown, total) => total == null ? `Showing ${shown.toLocaleString()} row(s).` : `Showing ${shown.toLocaleString()} of ${total.toLocaleString()} row(s).`;
   var renderForm = (folder) => `
     <div class="quarry-settings">
         <form id="quarry-form">
@@ -583,6 +672,12 @@
                     <div class="auto-input auto-input-flex">
                         <label for="quarry-folder"><span class="auto-input-name">Datasets folder</span></label>
                         <input class="auto-text" type="text" id="quarry-folder" value="${escapeHtml(folder)}" placeholder="/path/to/datasets" autocomplete="off">
+                    </div>
+                    <div class="quarry-setting-row">
+                        <span class="auto-input-qbutton info-popover-button" onclick="doPopover('${ADD_TO_EXISTING_TAG_ID}', arguments[0])">?</span>
+                        <label for="${ADD_TO_EXISTING_TAG_ID}">Add to existing <code>&lt;q:&gt;</code> tag</label>
+                        <input type="checkbox" id="${ADD_TO_EXISTING_TAG_ID}">
+                        <div class="sui-popover sui-info-popover" id="popover_${ADD_TO_EXISTING_TAG_ID}"><b>Add to existing &lt;q:&gt; tag</b><br>When on, clicking a dataset name adds it to the first existing <code>&lt;q:…&gt;</code> tag (e.g. <code>&lt;q:A,B&gt;</code>) instead of inserting a separate one.</div>
                     </div>
                 </div>
             </div>
@@ -653,6 +748,14 @@
     if (folderEl) {
       folderEl.value = data.datasetsFolder ?? "";
     }
+    const addToExisting = data.addToExistingTag ?? false;
+    const addToExistingEl = document.getElementById(
+      ADD_TO_EXISTING_TAG_ID
+    );
+    if (addToExistingEl) {
+      addToExistingEl.checked = addToExisting;
+    }
+    setAddToExistingTag(addToExisting);
     const datasetsEl = document.getElementById("quarry-datasets");
     if (datasetsEl) {
       datasetsEl.innerHTML = renderDatasets(data.datasets ?? []);
@@ -693,12 +796,16 @@
     const container = document.getElementById("quarry-datasets");
     const promptColumns = container ? collectPromptColumns(container) : {};
     const tagColumns = container ? collectTagColumns(container) : {};
+    const addToExistingEl = document.getElementById(
+      ADD_TO_EXISTING_TAG_ID
+    );
     genericRequest(
       "QuarrySaveSettings",
       {
         datasetsFolder: folder,
         promptColumnsJson: JSON.stringify(promptColumns),
-        tagColumnsJson: JSON.stringify(tagColumns)
+        tagColumnsJson: JSON.stringify(tagColumns),
+        addToExistingTag: addToExistingEl?.checked ?? false
       },
       (data) => {
         if (data.success) {
@@ -735,6 +842,11 @@
       }
     });
   };
+  var previewDataset = null;
+  var previewShown = 0;
+  var previewTotal = null;
+  var previewExhausted = false;
+  var previewBusy = false;
   var ensurePreviewModal = () => {
     if (document.getElementById(PREVIEW_MODAL_ID)) {
       return;
@@ -753,13 +865,20 @@
                 <div class="modal-body">
                     <div id="${PREVIEW_BODY_ID}" class="quarry-preview-body"></div>
                 </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary basic-button" data-bs-dismiss="modal">Close</button>
+                <div class="modal-footer quarry-preview-footer">
+                    <span id="${PREVIEW_STATUS_ID}" class="quarry-preview-status"></span>
+                    <span class="quarry-preview-footer-actions">
+                        <button type="button" id="${PREVIEW_CLEAR_ID}" class="basic-button" title="Drop this dataset's cached preview rows and reload the first page">Clear cache</button>
+                        <button type="button" id="${PREVIEW_LOAD_MORE_ID}" class="basic-button" title="Load and cache ${PREVIEW_LOAD_MORE_COUNT} more rows">Load ${PREVIEW_LOAD_MORE_COUNT} more</button>
+                        <button type="button" class="btn btn-secondary basic-button" data-bs-dismiss="modal">Close</button>
+                    </span>
                 </div>
             </div>
         </div>`;
     document.body.appendChild(modal);
     modal.querySelector('[data-bs-dismiss="modal"]')?.addEventListener("click", hidePreviewModal);
+    document.getElementById(PREVIEW_LOAD_MORE_ID)?.addEventListener("click", loadMorePreview);
+    document.getElementById(PREVIEW_CLEAR_ID)?.addEventListener("click", clearPreviewCache);
   };
   var showPreviewModal = () => {
     if (typeof $ === "function") {
@@ -779,32 +898,105 @@
       cell.textContent = formatRowCount(count);
     }
   };
+  var updatePreviewControls = () => {
+    const loadMore = document.getElementById(
+      PREVIEW_LOAD_MORE_ID
+    );
+    const clear = document.getElementById(
+      PREVIEW_CLEAR_ID
+    );
+    const status = document.getElementById(PREVIEW_STATUS_ID);
+    if (loadMore) {
+      loadMore.disabled = previewBusy || previewExhausted || !previewDataset;
+    }
+    if (clear) {
+      clear.disabled = previewBusy || !previewDataset;
+    }
+    if (status) {
+      status.textContent = previewBusy ? "Loading…" : renderPreviewStatus(previewShown, previewTotal);
+    }
+  };
+  var fetchPreview = (dataset, limit, isLoadMore) => {
+    previewBusy = true;
+    updatePreviewControls();
+    genericRequest(
+      "QuarryPreviewDataset",
+      { dataset, limit },
+      (data) => {
+        previewBusy = false;
+        if (previewDataset !== dataset) {
+          return;
+        }
+        const bodyEl = document.getElementById(PREVIEW_BODY_ID);
+        if (!data.success) {
+          if (bodyEl && !isLoadMore) {
+            bodyEl.innerHTML = `<div class="quarry-preview-error">${escapeHtml(data.error ?? "Failed to load preview.")}</div>`;
+          }
+          updatePreviewControls();
+          return;
+        }
+        const columns = data.columns ?? [];
+        const rows = data.rows ?? [];
+        previewShown = rows.length;
+        previewTotal = data.rowCount ?? null;
+        previewExhausted = rows.length < limit || previewTotal !== null && previewShown >= previewTotal;
+        applyRowCount(dataset, previewTotal);
+        if (bodyEl) {
+          bodyEl.innerHTML = renderPreviewTable(columns, rows);
+        }
+        updatePreviewControls();
+      }
+    );
+  };
   var openPreview = (dataset) => {
     ensurePreviewModal();
+    previewDataset = dataset;
+    previewShown = 0;
+    previewTotal = null;
+    previewExhausted = false;
     const titleEl = document.getElementById(PREVIEW_TITLE_ID);
-    const bodyEl = document.getElementById(PREVIEW_BODY_ID);
     if (titleEl) {
-      titleEl.textContent = `Preview — ${dataset} (first ${PREVIEW_ROW_LIMIT} rows)`;
+      titleEl.textContent = `Preview — ${dataset}`;
     }
+    const bodyEl = document.getElementById(PREVIEW_BODY_ID);
     if (bodyEl) {
       bodyEl.innerHTML = `<div class="quarry-preview-loading">Loading…</div>`;
     }
     showPreviewModal();
+    fetchPreview(dataset, PREVIEW_ROW_LIMIT, false);
+  };
+  var loadMorePreview = () => {
+    if (!previewDataset || previewBusy || previewExhausted) {
+      return;
+    }
+    fetchPreview(previewDataset, previewShown + PREVIEW_LOAD_MORE_COUNT, true);
+  };
+  var clearPreviewCache = () => {
+    const dataset = previewDataset;
+    if (!dataset || previewBusy) {
+      return;
+    }
+    previewBusy = true;
+    updatePreviewControls();
     genericRequest(
-      "QuarryPreviewDataset",
-      { dataset, limit: PREVIEW_ROW_LIMIT },
+      "QuarryClearPreviewCache",
+      { dataset },
       (data) => {
-        if (!bodyEl) {
+        previewBusy = false;
+        if (previewDataset !== dataset) {
           return;
         }
-        if (data.success) {
-          const count = data.rowCount ?? null;
-          applyRowCount(dataset, count);
-          const summary = count == null ? "" : `<div class="quarry-preview-summary">${formatRowCount(count)} row(s).</div>`;
-          bodyEl.innerHTML = summary + renderPreviewTable(data.columns ?? [], data.rows ?? []);
-        } else {
-          bodyEl.innerHTML = `<div class="quarry-preview-error">${escapeHtml(data.error ?? "Failed to load preview.")}</div>`;
+        if (!data.success) {
+          updatePreviewControls();
+          return;
         }
+        previewShown = 0;
+        previewExhausted = false;
+        const bodyEl = document.getElementById(PREVIEW_BODY_ID);
+        if (bodyEl) {
+          bodyEl.innerHTML = `<div class="quarry-preview-loading">Loading…</div>`;
+        }
+        fetchPreview(dataset, PREVIEW_ROW_LIMIT, false);
       }
     );
   };
@@ -846,6 +1038,9 @@
     document.getElementById("quarry-refresh")?.addEventListener("click", refresh);
     document.getElementById("quarry-download-datasets")?.addEventListener("click", () => openDownloadModal(loadSettings));
     document.getElementById("quarry-datasets")?.addEventListener("click", datasetsClickHandler);
+    document.getElementById(ADD_TO_EXISTING_TAG_ID)?.addEventListener("change", (event) => {
+      setAddToExistingTag(event.target.checked);
+    });
   };
   var installRequirements = () => {
     const button = document.getElementById(

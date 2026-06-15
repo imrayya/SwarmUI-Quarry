@@ -12,16 +12,16 @@ You are explicitly required to run the unit tests for this extension whenever yo
 
 ## Where `run-tests` is (working directory matters)
 
-The `run-tests` script lives in **this extension's root directory**: the folder that contains `SwarmUI-QuarryExtension.csproj`, `SwarmUI-QuarryExtension.Tests.sln`, and `run-tests`. It is **not** at the main SwarmUI repository root and not inside `src/`, `Tests/`, or `frontend/`.
+The `run-tests` script lives in **this extension's root directory**: the folder that contains `SwarmUI-Quarry.csproj`, `SwarmUI-Quarry.Tests.sln`, and `run-tests`. It is **not** at the main SwarmUI repository root and not inside `src/`, `Tests/`, or `frontend/`.
 
 Before running it:
 
 1. **Confirm cwd**: your shell (or tool `working_directory`) must be that extension root, **or**
 2. **Call it by path from the SwarmUI repo root**:
 
-   `./src/Extensions/SwarmUI-QuarryExtension/run-tests`
+   `./src/Extensions/SwarmUI-Quarry/run-tests`
 
-`run-tests` runs the backend xUnit suite (`dotnet test SwarmUI-QuarryExtension.Tests.sln`) and then the Jest frontend suite (`npm run test`). The backend tests build SwarmUI as a project reference; that is expected — do not separately rebuild or run the core SwarmUI app.
+`run-tests` runs the backend xUnit suite (`dotnet test SwarmUI-Quarry.Tests.sln`) and then the Jest frontend suite (`npm run test`). The backend tests build SwarmUI as a project reference; that is expected — do not separately rebuild or run the core SwarmUI app.
 
 # Build
 

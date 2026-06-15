@@ -14,6 +14,11 @@ public class QuarryExtension : Extension
     // Serializes requirement installs so two rapid clicks can't launch overlapping ~235 MB downloads.
     private static readonly SemaphoreSlim InstallLock = new(1, 1);
 
+    // Frontend behaviour preference, persisted in Quarry.json: when on, clicking a dataset name appends it to
+    // the prompt's first existing <q:...> tag instead of inserting a separate one. The backend only stores and
+    // echoes it — the Quarry tab reads it to decide how to edit the prompt.
+    private static bool AddToExistingTag;
+
     public override void OnPreInit()
     {
         ScriptFiles.Add("Assets/quarry.js");
@@ -33,6 +38,7 @@ public class QuarryExtension : Extension
         API.RegisterAPICall(QuarrySaveSettings, true, Permissions.FundamentalGenerateTabAccess);
         API.RegisterAPICall(QuarryRefresh, true, Permissions.FundamentalGenerateTabAccess);
         API.RegisterAPICall(QuarryPreviewDataset, false, Permissions.FundamentalGenerateTabAccess);
+        API.RegisterAPICall(QuarryClearPreviewCache, true, Permissions.FundamentalGenerateTabAccess);
         API.RegisterAPICall(QuarryResolveReferences, false, Permissions.FundamentalGenerateTabAccess);
         API.RegisterAPICall(QuarryInstallRequirements, true, Permissions.InstallFeatures);
         API.RegisterAPICall(QuarryListAvailableDatasets, false, Permissions.FundamentalGenerateTabAccess);
@@ -93,6 +99,7 @@ public class QuarryExtension : Extension
             }
             JObject settings = JObject.Parse(File.ReadAllText(SettingsFilePath));
             DatasetManager.DatasetsFolder = settings.Value<string>("datasetsFolder") ?? "";
+            AddToExistingTag = settings.Value<bool?>("addToExistingTag") ?? false;
             DatasetManager.SetPromptColumns(ReadPromptColumns(settings["promptColumns"] as JObject));
             DatasetManager.SetTagColumns(ReadTagColumns(settings["tagColumns"] as JObject));
         }
@@ -119,6 +126,7 @@ public class QuarryExtension : Extension
             JObject settings = new()
             {
                 ["datasetsFolder"] = DatasetManager.DatasetsFolder,
+                ["addToExistingTag"] = AddToExistingTag,
                 ["promptColumns"] = promptColumns,
                 ["tagColumns"] = tagColumns,
             };
@@ -195,6 +203,7 @@ public class QuarryExtension : Extension
         {
             ["success"] = true,
             ["datasetsFolder"] = DatasetManager.DatasetsFolder,
+            ["addToExistingTag"] = AddToExistingTag,
             ["active"] = DatasetManager.IsActive,
             ["requirementsInstalled"] = requirementsInstalled,
             ["count"] = DatasetManager.Count,
@@ -207,11 +216,12 @@ public class QuarryExtension : Extension
         return Task.FromResult(BuildSettingsResponse());
     }
 
-    public Task<JObject> QuarrySaveSettings(Session session, string datasetsFolder, string promptColumnsJson, string tagColumnsJson)
+    public Task<JObject> QuarrySaveSettings(Session session, string datasetsFolder, string promptColumnsJson, string tagColumnsJson, bool addToExistingTag = false)
     {
         try
         {
             DatasetManager.DatasetsFolder = datasetsFolder ?? "";
+            AddToExistingTag = addToExistingTag;
             JObject parsed = string.IsNullOrWhiteSpace(promptColumnsJson) ? [] : JObject.Parse(promptColumnsJson);
             DatasetManager.SetPromptColumns(ReadPromptColumns(parsed));
             JObject parsedTags = string.IsNullOrWhiteSpace(tagColumnsJson) ? [] : JObject.Parse(tagColumnsJson);
@@ -242,7 +252,7 @@ public class QuarryExtension : Extension
 
     public Task<JObject> QuarryPreviewDataset(Session session, string dataset, int limit = DatasetManager.DefaultPreviewLimit)
     {
-        int clamped = Math.Clamp(limit <= 0 ? DatasetManager.DefaultPreviewLimit : limit, 1, 1000);
+        int clamped = Math.Clamp(limit <= 0 ? DatasetManager.DefaultPreviewLimit : limit, 1, DatasetManager.MaxPreviewLimit);
         (bool success, List<string> columns, List<List<string>> rows, string error) = DatasetManager.PreviewDataset(dataset, clamped);
         if (!success)
         {
@@ -262,6 +272,15 @@ public class QuarryExtension : Extension
             response["rowCount"] = rowCount.Value;
         }
         return Task.FromResult(response);
+    }
+
+    // Drops the cached preview sample for one dataset so the next preview reloads the default first page. Backs
+    // the preview modal's "Clear cache" button (used after "Load more" has grown the sample).
+    public Task<JObject> QuarryClearPreviewCache(Session session, string dataset)
+    {
+        return Task.FromResult(DatasetManager.ClearPreviewCache(dataset)
+            ? new JObject { ["success"] = true }
+            : new JObject { ["success"] = false, ["error"] = $"Unknown dataset '{dataset}'." });
     }
 
     // Returns the wildcard names of Quarry datasets the current prompt references, so the UI can flag in-use files.

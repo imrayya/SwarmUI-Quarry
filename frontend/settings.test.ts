@@ -4,9 +4,11 @@ import {
     collectPromptColumns,
     collectTagColumns,
     formatRowCount,
+    PREVIEW_LOAD_MORE_COUNT,
     PREVIEW_ROW_LIMIT,
     renderDatasetRow,
     renderDatasets,
+    renderPreviewStatus,
     renderPreviewTable,
 } from "./settings";
 import { escapeHtml } from "./util";
@@ -255,6 +257,27 @@ describe("renderPreviewTable", () => {
 describe("PREVIEW_ROW_LIMIT", () => {
     it("is 100", () => {
         expect(PREVIEW_ROW_LIMIT).toBe(100);
+    });
+});
+
+describe("PREVIEW_LOAD_MORE_COUNT", () => {
+    it("is 500", () => {
+        expect(PREVIEW_LOAD_MORE_COUNT).toBe(500);
+    });
+});
+
+describe("renderPreviewStatus", () => {
+    it("shows the loaded count out of the total, with separators", () => {
+        expect(renderPreviewStatus(600, 1234)).toBe(
+            "Showing 600 of 1,234 row(s).",
+        );
+    });
+
+    it("omits the total when the row count is unknown", () => {
+        expect(renderPreviewStatus(50, null)).toBe("Showing 50 row(s).");
+        expect(renderPreviewStatus(1000, undefined)).toBe(
+            "Showing 1,000 row(s).",
+        );
     });
 });
 

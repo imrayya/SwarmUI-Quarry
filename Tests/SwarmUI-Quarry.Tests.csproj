@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <IsTestProject>true</IsTestProject>
+    <IsPackable>false</IsPackable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <NoWarn>CS0436</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!-- Direct ref so DuckDB's native lib deploys to the test output (the extension project itself
+         suppresses copy-local). Integration tests run real queries against an in-memory DuckDB. -->
+    <PackageReference Include="DuckDB.NET.Data.Full" Version="1.5.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\SwarmUI.csproj">
+      <Properties>_EnableMacOSCodeSign=false;StaticWebAssetsEnabled=false</Properties>
+    </ProjectReference>
+    <ProjectReference Include="..\SwarmUI-Quarry.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="bin/**/*.cs" />
+    <Compile Remove="obj/**/*.cs" />
+    <Compile Remove="**/._*" />
+  </ItemGroup>
+
+</Project>

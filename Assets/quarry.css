@@ -130,6 +130,32 @@
     color: var(--red);
 }
 
+/* "Add to existing <q:> tag" setting at the bottom of the panel: a core-style info-popover button, then the
+   label, then the checkbox. The content area is a wrapping flexbox, so claim a full row (like .quarry-datasets)
+   to sit on its own line below the folder input. */
+.quarry-setting-row {
+    margin-top: 0.6rem;
+    flex-basis: 100%;
+    width: 100%;
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 0.4rem;
+}
+
+.quarry-setting-row label {
+    cursor: pointer;
+    margin: 0;
+}
+
+.quarry-setting-row input {
+    margin: 0;
+}
+
+.quarry-setting-row code {
+    font-family: monospace;
+}
+
 .quarry-preview-dialog {
     max-width: 95vw;
 }
@@ -175,9 +201,24 @@
     padding: 0.5rem;
 }
 
-.quarry-preview-summary {
+/* Preview modal footer: row count on the left, Clear cache / Load more / Close on the right. */
+.modal-footer.quarry-preview-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.quarry-preview-status {
     color: var(--text-soft);
-    padding: 0.25rem 0.5rem 0.5rem;
+    font-size: 0.9em;
+    font-variant-numeric: tabular-nums;
+}
+
+.quarry-preview-footer-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
 }
 
 /* --- Quarry bottom-bar tab --- */

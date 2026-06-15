@@ -1,5 +1,10 @@
 import { openDownloadModal } from "./download";
-import { insertQuarryTag, onReferences, recomputeReferences } from "./prompt";
+import {
+    insertQuarryTag,
+    onReferences,
+    recomputeReferences,
+    setAddToExistingTag,
+} from "./prompt";
 import { QUARRY_TAB_BODY_ID } from "./tab";
 import type {
     DatasetDto,
@@ -11,9 +16,15 @@ import { escapeHtml } from "./util";
 
 const MESSAGE_TIMEOUT_MS = 5000;
 export const PREVIEW_ROW_LIMIT = 100;
+// How many extra rows each "Load more" click pulls (and caches) in the preview modal.
+export const PREVIEW_LOAD_MORE_COUNT = 500;
+const ADD_TO_EXISTING_TAG_ID = "quarry-add-to-existing-tag";
 const PREVIEW_MODAL_ID = "quarry-preview-modal";
 const PREVIEW_TITLE_ID = "quarry-preview-title";
 const PREVIEW_BODY_ID = "quarry-preview-body";
+const PREVIEW_STATUS_ID = "quarry-preview-status";
+const PREVIEW_LOAD_MORE_ID = "quarry-preview-loadmore";
+const PREVIEW_CLEAR_ID = "quarry-preview-clear";
 
 export const renderDatasetOptions = (dataset: DatasetDto): string =>
     dataset.columns
@@ -73,7 +84,7 @@ export const renderDatasetRow = (dataset: DatasetDto): string => {
         <td><select class="quarry-dataset-column" data-dataset="${name}">${renderDatasetOptions(dataset)}</select></td>
         <td class="quarry-dataset-tags" title="Columns the 'tags' keyword searches across">${renderTagCheckboxes(dataset)}</td>
         <td class="quarry-dataset-rows" data-dataset="${name}" title="Rows in the dataset (loads when you preview it if not already counted)">${formatRowCount(dataset.rowCount)}</td>
-        <td><button type="button" class="basic-button quarry-preview-button" data-dataset="${name}" title="Preview the first ${PREVIEW_ROW_LIMIT} rows">Preview</button></td>
+        <td><button type="button" class="basic-button quarry-preview-button" data-dataset="${name}" title="Preview this dataset's rows (load more in the dialog)">Preview</button></td>
     </tr>`;
 };
 
@@ -117,6 +128,16 @@ export const renderPreviewTable = (
     </table>`;
 };
 
+/// The preview modal's footer status line, e.g. `Showing 600 of 1,234 row(s).`, dropping the total when the
+/// row count couldn't be determined.
+export const renderPreviewStatus = (
+    shown: number,
+    total: number | null | undefined,
+): string =>
+    total == null
+        ? `Showing ${shown.toLocaleString()} row(s).`
+        : `Showing ${shown.toLocaleString()} of ${total.toLocaleString()} row(s).`;
+
 export const renderForm = (folder: string): string => `
     <div class="quarry-settings">
         <form id="quarry-form">
@@ -133,6 +154,12 @@ export const renderForm = (folder: string): string => `
                     <div class="auto-input auto-input-flex">
                         <label for="quarry-folder"><span class="auto-input-name">Datasets folder</span></label>
                         <input class="auto-text" type="text" id="quarry-folder" value="${escapeHtml(folder)}" placeholder="/path/to/datasets" autocomplete="off">
+                    </div>
+                    <div class="quarry-setting-row">
+                        <span class="auto-input-qbutton info-popover-button" onclick="doPopover('${ADD_TO_EXISTING_TAG_ID}', arguments[0])">?</span>
+                        <label for="${ADD_TO_EXISTING_TAG_ID}">Add to existing <code>&lt;q:&gt;</code> tag</label>
+                        <input type="checkbox" id="${ADD_TO_EXISTING_TAG_ID}">
+                        <div class="sui-popover sui-info-popover" id="popover_${ADD_TO_EXISTING_TAG_ID}"><b>Add to existing &lt;q:&gt; tag</b><br>When on, clicking a dataset name adds it to the first existing <code>&lt;q:…&gt;</code> tag (e.g. <code>&lt;q:A,B&gt;</code>) instead of inserting a separate one.</div>
                     </div>
                 </div>
             </div>
@@ -218,6 +245,15 @@ const applyResponse = (data: SettingsResponse): void => {
     if (folderEl) {
         folderEl.value = data.datasetsFolder ?? "";
     }
+    const addToExisting = data.addToExistingTag ?? false;
+    const addToExistingEl = document.getElementById(
+        ADD_TO_EXISTING_TAG_ID,
+    ) as HTMLInputElement | null;
+    if (addToExistingEl) {
+        addToExistingEl.checked = addToExisting;
+    }
+    // Keep the click-behavior preference (read by insertQuarryTag) in sync with the saved value.
+    setAddToExistingTag(addToExisting);
     const datasetsEl = document.getElementById("quarry-datasets");
     if (datasetsEl) {
         datasetsEl.innerHTML = renderDatasets(data.datasets ?? []);
@@ -265,12 +301,16 @@ const saveSettings = (): void => {
     const container = document.getElementById("quarry-datasets");
     const promptColumns = container ? collectPromptColumns(container) : {};
     const tagColumns = container ? collectTagColumns(container) : {};
+    const addToExistingEl = document.getElementById(
+        ADD_TO_EXISTING_TAG_ID,
+    ) as HTMLInputElement | null;
     genericRequest<SettingsResponse>(
         "QuarrySaveSettings",
         {
             datasetsFolder: folder,
             promptColumnsJson: JSON.stringify(promptColumns),
             tagColumnsJson: JSON.stringify(tagColumns),
+            addToExistingTag: addToExistingEl?.checked ?? false,
         },
         (data) => {
             if (data.success) {
@@ -309,6 +349,15 @@ const refresh = (): void => {
     });
 };
 
+// --- Preview modal state ---
+// The dataset whose preview is open, how many rows are currently shown, the dataset's total row count (null
+// when unknown), whether every available row is loaded, and whether a request is in flight.
+let previewDataset: string | null = null;
+let previewShown = 0;
+let previewTotal: number | null = null;
+let previewExhausted = false;
+let previewBusy = false;
+
 const ensurePreviewModal = (): void => {
     if (document.getElementById(PREVIEW_MODAL_ID)) {
         return;
@@ -327,8 +376,13 @@ const ensurePreviewModal = (): void => {
                 <div class="modal-body">
                     <div id="${PREVIEW_BODY_ID}" class="quarry-preview-body"></div>
                 </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary basic-button" data-bs-dismiss="modal">Close</button>
+                <div class="modal-footer quarry-preview-footer">
+                    <span id="${PREVIEW_STATUS_ID}" class="quarry-preview-status"></span>
+                    <span class="quarry-preview-footer-actions">
+                        <button type="button" id="${PREVIEW_CLEAR_ID}" class="basic-button" title="Drop this dataset's cached preview rows and reload the first page">Clear cache</button>
+                        <button type="button" id="${PREVIEW_LOAD_MORE_ID}" class="basic-button" title="Load and cache ${PREVIEW_LOAD_MORE_COUNT} more rows">Load ${PREVIEW_LOAD_MORE_COUNT} more</button>
+                        <button type="button" class="btn btn-secondary basic-button" data-bs-dismiss="modal">Close</button>
+                    </span>
                 </div>
             </div>
         </div>`;
@@ -336,6 +390,12 @@ const ensurePreviewModal = (): void => {
     modal
         .querySelector('[data-bs-dismiss="modal"]')
         ?.addEventListener("click", hidePreviewModal);
+    document
+        .getElementById(PREVIEW_LOAD_MORE_ID)
+        ?.addEventListener("click", loadMorePreview);
+    document
+        .getElementById(PREVIEW_CLEAR_ID)
+        ?.addEventListener("click", clearPreviewCache);
 };
 
 const showPreviewModal = (): void => {
@@ -361,44 +421,132 @@ const applyRowCount = (dataset: string, count: number | null): void => {
     }
 };
 
+// Enables/disables the footer buttons and updates the status line from the current preview state.
+const updatePreviewControls = (): void => {
+    const loadMore = document.getElementById(
+        PREVIEW_LOAD_MORE_ID,
+    ) as HTMLButtonElement | null;
+    const clear = document.getElementById(
+        PREVIEW_CLEAR_ID,
+    ) as HTMLButtonElement | null;
+    const status = document.getElementById(PREVIEW_STATUS_ID);
+    if (loadMore) {
+        loadMore.disabled = previewBusy || previewExhausted || !previewDataset;
+    }
+    if (clear) {
+        clear.disabled = previewBusy || !previewDataset;
+    }
+    if (status) {
+        status.textContent = previewBusy
+            ? "Loading…"
+            : renderPreviewStatus(previewShown, previewTotal);
+    }
+};
+
+// Loads up to `limit` rows for `dataset` and renders them. The backend serves whatever it has cached when that
+// already covers the request, so this both opens a preview and grows it via "Load more". `isLoadMore` only
+// affects failure handling: a failed grow keeps the rows already on screen.
+const fetchPreview = (
+    dataset: string,
+    limit: number,
+    isLoadMore: boolean,
+): void => {
+    previewBusy = true;
+    updatePreviewControls();
+    genericRequest<PreviewResponse>(
+        "QuarryPreviewDataset",
+        { dataset, limit },
+        (data) => {
+            previewBusy = false;
+            // A stale response for a dataset the user has since navigated away from — ignore it.
+            if (previewDataset !== dataset) {
+                return;
+            }
+            const bodyEl = document.getElementById(PREVIEW_BODY_ID);
+            if (!data.success) {
+                if (bodyEl && !isLoadMore) {
+                    bodyEl.innerHTML = `<div class="quarry-preview-error">${escapeHtml(data.error ?? "Failed to load preview.")}</div>`;
+                }
+                updatePreviewControls();
+                return;
+            }
+            const columns = data.columns ?? [];
+            const rows = data.rows ?? [];
+            previewShown = rows.length;
+            previewTotal = data.rowCount ?? null;
+            // The end is reached when fewer rows came back than asked for, or we already hold every counted row.
+            previewExhausted =
+                rows.length < limit ||
+                (previewTotal !== null && previewShown >= previewTotal);
+            applyRowCount(dataset, previewTotal);
+            if (bodyEl) {
+                bodyEl.innerHTML = renderPreviewTable(columns, rows);
+            }
+            updatePreviewControls();
+        },
+    );
+};
+
 export const openPreview = (dataset: string): void => {
     ensurePreviewModal();
+    previewDataset = dataset;
+    previewShown = 0;
+    previewTotal = null;
+    previewExhausted = false;
     const titleEl = document.getElementById(PREVIEW_TITLE_ID);
-    const bodyEl = document.getElementById(PREVIEW_BODY_ID);
     if (titleEl) {
-        titleEl.textContent = `Preview — ${dataset} (first ${PREVIEW_ROW_LIMIT} rows)`;
+        titleEl.textContent = `Preview — ${dataset}`;
     }
+    const bodyEl = document.getElementById(PREVIEW_BODY_ID);
     if (bodyEl) {
         bodyEl.innerHTML = `<div class="quarry-preview-loading">Loading…</div>`;
     }
     showPreviewModal();
-    genericRequest<PreviewResponse>(
-        "QuarryPreviewDataset",
-        { dataset, limit: PREVIEW_ROW_LIMIT },
+    fetchPreview(dataset, PREVIEW_ROW_LIMIT, false);
+};
+
+// Pulls the next page of rows (the current count plus PREVIEW_LOAD_MORE_COUNT) into the preview, caching them.
+const loadMorePreview = (): void => {
+    if (!previewDataset || previewBusy || previewExhausted) {
+        return;
+    }
+    fetchPreview(previewDataset, previewShown + PREVIEW_LOAD_MORE_COUNT, true);
+};
+
+// Drops the open dataset's cached preview on the backend, then reloads the default first page fresh.
+const clearPreviewCache = (): void => {
+    const dataset = previewDataset;
+    if (!dataset || previewBusy) {
+        return;
+    }
+    previewBusy = true;
+    updatePreviewControls();
+    genericRequest<{ success: boolean; error?: string }>(
+        "QuarryClearPreviewCache",
+        { dataset },
         (data) => {
-            if (!bodyEl) {
+            previewBusy = false;
+            if (previewDataset !== dataset) {
                 return;
             }
-            if (data.success) {
-                const count = data.rowCount ?? null;
-                applyRowCount(dataset, count);
-                const summary =
-                    count == null
-                        ? ""
-                        : `<div class="quarry-preview-summary">${formatRowCount(count)} row(s).</div>`;
-                bodyEl.innerHTML =
-                    summary +
-                    renderPreviewTable(data.columns ?? [], data.rows ?? []);
-            } else {
-                bodyEl.innerHTML = `<div class="quarry-preview-error">${escapeHtml(data.error ?? "Failed to load preview.")}</div>`;
+            if (!data.success) {
+                updatePreviewControls();
+                return;
             }
+            previewShown = 0;
+            previewExhausted = false;
+            const bodyEl = document.getElementById(PREVIEW_BODY_ID);
+            if (bodyEl) {
+                bodyEl.innerHTML = `<div class="quarry-preview-loading">Loading…</div>`;
+            }
+            fetchPreview(dataset, PREVIEW_ROW_LIMIT, false);
         },
     );
 };
 
 /// Click delegation for the datasets table: a preview button opens the preview modal; a dataset-name link
-/// drops a `<q:NAME>` reference into the prompt (toggling it off if the cursor sits right after one we just
-/// inserted) — the row's in-prompt highlight then follows via onReferences.
+/// drops a `<q:NAME>` reference into the prompt (or toggles it off if the dataset is already referenced) — the
+/// row's in-prompt highlight then follows via onReferences.
 const datasetsClickHandler = (event: Event): void => {
     const target = event.target as HTMLElement | null;
     const previewButton = target?.closest<HTMLElement>(
@@ -449,6 +597,12 @@ const ensureFormRendered = (): void => {
     document
         .getElementById("quarry-datasets")
         ?.addEventListener("click", datasetsClickHandler);
+    // Apply the preference immediately on toggle (saved server-side only when Save Settings is clicked).
+    document
+        .getElementById(ADD_TO_EXISTING_TAG_ID)
+        ?.addEventListener("change", (event) => {
+            setAddToExistingTag((event.target as HTMLInputElement).checked);
+        });
 };
 
 /// Triggers the one-time backend install of the DuckDB lance extension, then reloads settings — which swaps
