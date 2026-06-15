@@ -33,6 +33,8 @@ export interface PreviewResponse {
     dataset?: string;
     columns?: string[];
     rows?: string[][];
+    // Usable-pick row count, loaded lazily alongside the preview rows (null when it couldn't be counted).
+    rowCount?: number | null;
     error?: string;
 }
 

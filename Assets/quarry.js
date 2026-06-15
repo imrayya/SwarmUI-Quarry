@@ -133,7 +133,7 @@
         <td><code class="quarry-dataset-name">${name}</code></td>
         <td><select class="quarry-dataset-column" data-dataset="${name}">${renderDatasetOptions(dataset)}</select></td>
         <td class="quarry-dataset-tags" title="Columns the 'tags' keyword searches across">${renderTagCheckboxes(dataset)}</td>
-        <td class="quarry-dataset-rows" title="${formatRowCount(dataset.rowCount)} rows with a non-empty prompt (usable picks)">${formatRowCount(dataset.rowCount)}</td>
+        <td class="quarry-dataset-rows" data-dataset="${name}" title="Usable picks (rows with a non-empty prompt) — loads when you preview this dataset">${formatRowCount(dataset.rowCount)}</td>
         <td><button type="button" class="basic-button quarry-preview-button" data-dataset="${name}" title="Preview the first ${PREVIEW_ROW_LIMIT} rows">👁 Preview</button></td>
     </tr>`;
   };
@@ -378,6 +378,14 @@
       $(`#${PREVIEW_MODAL_ID}`).modal("hide");
     }
   };
+  var applyRowCount = (dataset, count) => {
+    const selector = `td.quarry-dataset-rows[data-dataset="${dataset.replace(/(["\\])/g, "\\$1")}"]`;
+    for (const cell of Array.from(
+      document.querySelectorAll(selector)
+    )) {
+      cell.textContent = formatRowCount(count);
+    }
+  };
   var openPreview = (dataset) => {
     ensurePreviewModal();
     const titleEl = document.getElementById(PREVIEW_TITLE_ID);
@@ -397,10 +405,10 @@
           return;
         }
         if (data.success) {
-          bodyEl.innerHTML = renderPreviewTable(
-            data.columns ?? [],
-            data.rows ?? []
-          );
+          const count = data.rowCount ?? null;
+          applyRowCount(dataset, count);
+          const summary = count == null ? "" : `<div class="quarry-preview-summary">${formatRowCount(count)} usable row(s) with a non-empty prompt.</div>`;
+          bodyEl.innerHTML = summary + renderPreviewTable(data.columns ?? [], data.rows ?? []);
         } else {
           bodyEl.innerHTML = `<div class="quarry-preview-error">${escapeHtml(data.error ?? "Failed to load preview.")}</div>`;
         }

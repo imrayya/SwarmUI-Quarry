@@ -168,6 +168,11 @@
     padding: 0.5rem;
 }
 
+.quarry-preview-summary {
+    color: var(--text-soft);
+    padding: 0.25rem 0.5rem 0.5rem;
+}
+
 /* --- Quarry browser tab (cards) --- */
 
 .quarry-card-title {

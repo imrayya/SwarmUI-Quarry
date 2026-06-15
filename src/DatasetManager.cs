@@ -1,5 +1,6 @@
 using System.IO;
 using FreneticUtilities.FreneticExtensions;
+using Newtonsoft.Json.Linq;
 using SwarmUI.Core;
 using SwarmUI.Utils;
 
@@ -28,8 +29,15 @@ public static class DatasetManager
 
     // key = wildcard name lowercased
     private static readonly ConcurrentDictionary<string, DatasetEntry> Datasets = new();
-    private static readonly ConcurrentDictionary<string, (string Hash, ColumnSchema Schema)> SchemaCache = new();
-    private static readonly ConcurrentDictionary<string, (string Hash, string PromptColumn, long Count)> RowCountCache = new();
+    // Per-file derived data (schema, usable row count, preview sample), all keyed by the file's hash and
+    // persisted to disk so a restart doesn't recompute them for unchanged files. See the Persistent cache region.
+    private static readonly ConcurrentDictionary<string, CacheEntry> Cache = new();
+    private static readonly object CacheLock = new();
+    private static volatile bool _cacheDirty;
+    private const int CacheVersion = 1;
+    /// <summary>Number of preview rows the UI requests and that warming pre-caches. Keep in sync with the
+    /// preview limit the API/frontend use, so a warmed preview is a cache hit for the real request.</summary>
+    public const int DefaultPreviewLimit = 100;
     private static readonly Dictionary<string, string> PromptColumns = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, List<string>> TagColumns = new(StringComparer.OrdinalIgnoreCase);
     private static readonly object PromptColumnsLock = new();
@@ -43,6 +51,9 @@ public static class DatasetManager
 
     public static void Initialize()
     {
+        // Seed the in-memory cache from the persisted file before the first Sync, so unchanged files reuse
+        // their stored schema / row count / preview instead of recomputing them this session.
+        LoadCache();
         // One-time housekeeping: an earlier Quarry mirrored every dataset to a placeholder .txt in the
         // Wildcards folder. We no longer do that, so remove any that are still lying around.
         CleanupLegacyPlaceholders();
@@ -56,6 +67,7 @@ public static class DatasetManager
     public static void Shutdown()
     {
         Program.ModelRefreshEvent -= OnModelRefresh;
+        PersistCacheIfDirty();
         _backend?.Dispose();
         _backend = null;
     }
@@ -150,16 +162,16 @@ public static class DatasetManager
     /// matched against (replacing the Wildcards folder we used to lean on).</summary>
     public static IReadOnlyList<string> AllDatasetNames => [.. Datasets.Values.Select(e => e.WildcardName)];
 
-    /// <summary>Returns the dataset's schema, cached until the underlying file changes.</summary>
+    /// <summary>Returns the dataset's schema, cached (in memory and on disk) until the underlying file changes.</summary>
     public static ColumnSchema GetSchema(DatasetEntry entry)
     {
         string key = entry.WildcardName.ToLowerFast();
-        if (SchemaCache.TryGetValue(key, out (string Hash, ColumnSchema Schema) cached) && cached.Hash == entry.FileHash)
+        if (Cache.TryGetValue(key, out CacheEntry cached) && cached.Hash == entry.FileHash && cached.Schema is not null)
         {
             return cached.Schema;
         }
         ColumnSchema schema = Backend.GetSchema(entry.Path);
-        SchemaCache[key] = (entry.FileHash, schema);
+        StoreSchema(key, entry.FileHash, schema);
         return schema;
     }
 
@@ -171,21 +183,27 @@ public static class DatasetManager
     public static long GetRowCount(DatasetEntry entry, string promptColumn)
     {
         string key = entry.WildcardName.ToLowerFast();
-        if (RowCountCache.TryGetValue(key, out (string Hash, string PromptColumn, long Count) cached)
-            && cached.Hash == entry.FileHash && cached.PromptColumn == promptColumn)
+        string column = promptColumn ?? "";
+        if (Cache.TryGetValue(key, out CacheEntry cached) && cached.Hash == entry.FileHash
+            && cached.HasRowCount && cached.RowCountColumn == column)
         {
-            return cached.Count;
+            return cached.RowCount;
         }
         SqlFilter filter = string.IsNullOrEmpty(promptColumn)
             ? SqlFilter.None
             : SqlFilterBuilder.NonEmptyPrompt(promptColumn);
         long count = Backend.CountRows(entry.Path, filter);
-        RowCountCache[key] = (entry.FileHash, promptColumn, count);
+        StoreRowCount(key, entry.FileHash, column, count);
         return count;
     }
 
-    /// <summary>Per-dataset info for the settings UI: columns (name + list-ness) and the resolved prompt column.</summary>
-    public static List<DatasetInfo> GetDatasetsInfo()
+    /// <summary>Per-dataset info for the settings UI: columns (name + list-ness) and the resolved prompt column.
+    /// Reading the schema is cheap (DuckDB samples it, bounded regardless of file size), so it is always
+    /// included. The row count is a full-scan count that scales with file size, so by default it is left null
+    /// (<c>includeRowCounts: false</c>) and loaded lazily, one dataset at a time, when the user previews it —
+    /// see <see cref="GetUsableRowCount"/>. Eagerly counting every dataset here is what made an initial load
+    /// hang, and made large datasets appear to never load.</summary>
+    public static List<DatasetInfo> GetDatasetsInfo(bool includeRowCounts = false)
     {
         List<DatasetInfo> result = [];
         foreach (DatasetEntry entry in Datasets.Values.OrderBy(e => e.WildcardName, StringComparer.OrdinalIgnoreCase))
@@ -195,13 +213,16 @@ public static class DatasetManager
                 ColumnSchema schema = GetSchema(entry);
                 string resolved = PromptColumnResolver.Resolve(GetConfiguredPromptColumn(entry.WildcardName), schema);
                 long? rowCount = null;
-                try
+                if (includeRowCounts)
                 {
-                    rowCount = GetRowCount(entry, resolved);
-                }
-                catch
-                {
-                    // Row count is a best-effort display value; a count failure must not hide a readable dataset.
+                    try
+                    {
+                        rowCount = GetRowCount(entry, resolved);
+                    }
+                    catch
+                    {
+                        // Row count is a best-effort display value; a count failure must not hide a readable dataset.
+                    }
                 }
                 result.Add(new DatasetInfo(entry.WildcardName, [.. schema.Columns], resolved, GetConfiguredPromptColumn(entry.WildcardName), [.. GetConfiguredTagColumns(entry.WildcardName)], rowCount, null));
             }
@@ -210,7 +231,36 @@ public static class DatasetManager
                 result.Add(new DatasetInfo(entry.WildcardName, [], null, GetConfiguredPromptColumn(entry.WildcardName), [.. GetConfiguredTagColumns(entry.WildcardName)], null, ex.Message));
             }
         }
+        // Reading schemas above may have populated cache entries — flush them once for the whole batch.
+        PersistCacheIfDirty();
         return result;
+    }
+
+    /// <summary>Lazily computes one dataset's usable-pick row count (rows whose resolved prompt column is
+    /// non-empty) — the value the UI shows in its "Rows" column. Resolves the name to its file and prompt
+    /// column, then counts (cached until the file or prompt column changes). Returns a failure with a message
+    /// for an unknown dataset or a query/IO error. This is the on-demand counterpart to the deliberately
+    /// count-free <see cref="GetDatasetsInfo"/>: the preview path calls it so each file is counted only when
+    /// the user actually asks for it.</summary>
+    public static (bool Success, long? RowCount, string Error) GetUsableRowCount(string wildcardName)
+    {
+        DatasetEntry entry = Resolve(wildcardName);
+        if (entry is null)
+        {
+            return (false, null, $"Unknown dataset '{wildcardName}'.");
+        }
+        try
+        {
+            ColumnSchema schema = GetSchema(entry);
+            string resolved = PromptColumnResolver.Resolve(GetConfiguredPromptColumn(entry.WildcardName), schema);
+            long count = GetRowCount(entry, resolved);
+            PersistCacheIfDirty();
+            return (true, count, null);
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
     }
 
     /// <summary>Reads up to <paramref name="limit"/> rows from a dataset for the preview UI. Resolves the
@@ -223,14 +273,96 @@ public static class DatasetManager
         {
             return (false, null, null, $"Unknown dataset '{wildcardName}'.");
         }
+        string key = entry.WildcardName.ToLowerFast();
+        if (Cache.TryGetValue(key, out CacheEntry cached) && cached.Hash == entry.FileHash
+            && cached.Preview is not null && cached.Preview.Limit == limit)
+        {
+            return (true, cached.Preview.Columns, cached.Preview.Rows, null);
+        }
         try
         {
             (List<string> columns, List<List<string>> rows) = Backend.GetSampleRows(entry.Path, limit);
+            StorePreview(key, entry.FileHash, new PreviewData(limit, columns, rows));
+            PersistCacheIfDirty();
             return (true, columns, rows, null);
         }
         catch (Exception ex)
         {
             return (false, null, null, ex.Message);
+        }
+    }
+
+    /// <summary>Proactively computes and caches the schema, usable row count, and preview sample for every
+    /// dataset whose results aren't already cached for its current file hash, fanning the work out across a
+    /// small pool of independent DuckDB connections. Datasets already fully cached (unchanged files) are
+    /// skipped — so a warm after the first is cheap. Persists the cache once at the end. Returns the number of
+    /// datasets warmed this call. Used by Refresh so subsequent previews/counts are instant.</summary>
+    public static int WarmAll()
+    {
+        if (!IsActive)
+        {
+            return 0;
+        }
+        List<DatasetEntry> pending = [.. Datasets.Values.Where(entry => !IsFullyCached(entry, DefaultPreviewLimit))];
+        if (pending.Count == 0)
+        {
+            return 0;
+        }
+        // Each DuckDB query already parallelizes across cores, so we keep the number of concurrent
+        // connections modest to avoid oversubscription; the win here is hiding per-file I/O latency across
+        // many (often small) datasets, not stacking CPU-bound scans.
+        int parallelism = Math.Clamp(Environment.ProcessorCount / 2, 2, 6);
+        List<Action<IDatasetReader>> jobs = [];
+        foreach (DatasetEntry entry in pending)
+        {
+            DatasetEntry captured = entry;
+            jobs.Add(reader => WarmOne(reader, captured, DefaultPreviewLimit));
+        }
+        Backend.RunPooled(jobs, parallelism);
+        PersistCacheIfDirty();
+        Logs.Info($"Quarry: warmed {pending.Count} dataset(s).");
+        return pending.Count;
+    }
+
+    /// <summary>True when the cache already holds this file's schema, usable row count (for the column that
+    /// would be resolved now), and a preview at <paramref name="limit"/>, all under its current hash.</summary>
+    private static bool IsFullyCached(DatasetEntry entry, int limit)
+    {
+        if (!Cache.TryGetValue(entry.WildcardName.ToLowerFast(), out CacheEntry cached) || cached.Hash != entry.FileHash)
+        {
+            return false;
+        }
+        if (cached.Schema is null || !cached.HasRowCount || cached.Preview is null || cached.Preview.Limit != limit)
+        {
+            return false;
+        }
+        // The cached count is tied to a prompt column; if the resolved column changed (config edit), it's stale.
+        string resolved = PromptColumnResolver.Resolve(GetConfiguredPromptColumn(entry.WildcardName), cached.Schema) ?? "";
+        return cached.RowCountColumn == resolved;
+    }
+
+    /// <summary>Warms one dataset on a pooled connection: schema → resolved prompt column → usable count →
+    /// preview, storing each into the cache. Best-effort — an unreadable dataset is logged and skipped so it
+    /// never faults the warm run (the interactive path will surface its error later).</summary>
+    private static void WarmOne(IDatasetReader reader, DatasetEntry entry, int limit)
+    {
+        string key = entry.WildcardName.ToLowerFast();
+        try
+        {
+            ColumnSchema schema = reader.GetSchema(entry.Path);
+            StoreSchema(key, entry.FileHash, schema);
+            string resolved = PromptColumnResolver.Resolve(GetConfiguredPromptColumn(entry.WildcardName), schema) ?? "";
+            SqlFilter filter = string.IsNullOrEmpty(resolved)
+                ? SqlFilter.None
+                : SqlFilterBuilder.NonEmptyPrompt(resolved);
+            long count = reader.CountRows(entry.Path, filter);
+            StoreRowCount(key, entry.FileHash, resolved, count);
+            (List<string> columns, List<List<string>> rows) = reader.GetSampleRows(entry.Path, limit);
+            StorePreview(key, entry.FileHash, new PreviewData(limit, columns, rows));
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"Quarry: warm failed for '{entry.WildcardName}': {ex.Message}");
         }
     }
 
@@ -241,9 +373,9 @@ public static class DatasetManager
     {
         if (!IsActive)
         {
+            // Keep the file-backed Cache intact (entries are keyed by file hash and only discarded when that
+            // changes), so re-enabling Quarry doesn't have to recompute counts/previews. Just stop serving.
             Datasets.Clear();
-            SchemaCache.Clear();
-            RowCountCache.Clear();
             return;
         }
         try
@@ -270,13 +402,12 @@ public static class DatasetManager
                     continue;
                 }
                 string hash = ComputeHash(datasetPath);
-                if (SchemaCache.TryGetValue(key, out (string Hash, ColumnSchema Schema) cached) && cached.Hash != hash)
+                // The cache entry holds this file's schema, row count, and preview together, all keyed by its
+                // hash. If the file changed, drop the whole entry so each is recomputed from the new file.
+                if (Cache.TryGetValue(key, out CacheEntry cachedEntry) && cachedEntry.Hash != hash)
                 {
-                    SchemaCache.TryRemove(key, out _);
-                }
-                if (RowCountCache.TryGetValue(key, out (string Hash, string PromptColumn, long Count) cachedCount) && cachedCount.Hash != hash)
-                {
-                    RowCountCache.TryRemove(key, out _);
+                    Cache.TryRemove(key, out _);
+                    _cacheDirty = true;
                 }
                 if (!Datasets.TryGetValue(key, out DatasetEntry previous) || previous.FileHash != hash)
                 {
@@ -287,8 +418,10 @@ public static class DatasetManager
             foreach (string key in Datasets.Keys.Where(k => !seen.Contains(k)).ToList())
             {
                 Datasets.TryRemove(key, out _);
-                SchemaCache.TryRemove(key, out _);
-                RowCountCache.TryRemove(key, out _);
+                if (Cache.TryRemove(key, out _))
+                {
+                    _cacheDirty = true;
+                }
                 contentChanged = true;
             }
             // A dataset's files changed on disk, so drop the DuckDB connection's cached metadata (notably
@@ -298,6 +431,8 @@ public static class DatasetManager
             {
                 _backend?.Reset();
             }
+            // Persist any cache pruning (changed/removed files) done above.
+            PersistCacheIfDirty();
             Logs.Info($"Quarry: synced {Datasets.Count} dataset(s).");
         }
         catch (Exception ex)
@@ -382,6 +517,233 @@ public static class DatasetManager
             return "unknown";
         }
     }
+
+    #region Persistent cache
+    /// <summary>One file's cached, hash-keyed results: its schema, the usable row count for a given prompt
+    /// column, and a preview sample. Any subset may be present (filled in lazily as each is first needed); the
+    /// whole entry is invalidated together when the file's <see cref="DatasetEntry.FileHash"/> changes.</summary>
+    private sealed record CacheEntry
+    {
+        public required string Hash { get; init; }
+        public ColumnSchema Schema { get; init; }
+        public bool HasRowCount { get; init; }
+        public string RowCountColumn { get; init; }
+        public long RowCount { get; init; }
+        public PreviewData Preview { get; init; }
+    }
+
+    /// <summary>A cached preview: the first <see cref="Limit"/> rows of a file (column names + stringified
+    /// cells), exactly as the preview UI shows them.</summary>
+    private sealed record PreviewData(int Limit, List<string> Columns, List<List<string>> Rows);
+
+    /// <summary>The cache file path, next to the settings file under the SwarmUI data dir (outside this
+    /// extension's git repo, so it is never committed). Holds only derived data — safe to delete anytime.</summary>
+    private static string CacheFilePath => $"{Program.DataDir}/Quarry.Cache.json";
+
+    private static void StoreSchema(string key, string hash, ColumnSchema schema)
+    {
+        lock (CacheLock)
+        {
+            Cache[key] = BaseFor(key, hash) with { Schema = schema };
+            _cacheDirty = true;
+        }
+    }
+
+    private static void StoreRowCount(string key, string hash, string promptColumn, long count)
+    {
+        lock (CacheLock)
+        {
+            Cache[key] = BaseFor(key, hash) with { HasRowCount = true, RowCountColumn = promptColumn, RowCount = count };
+            _cacheDirty = true;
+        }
+    }
+
+    private static void StorePreview(string key, string hash, PreviewData preview)
+    {
+        lock (CacheLock)
+        {
+            Cache[key] = BaseFor(key, hash) with { Preview = preview };
+            _cacheDirty = true;
+        }
+    }
+
+    /// <summary>The existing entry to update when its hash still matches, or a fresh one (dropping any
+    /// now-stale schema/count/preview) when the file has changed. Caller must hold <see cref="CacheLock"/>.</summary>
+    private static CacheEntry BaseFor(string key, string hash) =>
+        Cache.TryGetValue(key, out CacheEntry existing) && existing.Hash == hash
+            ? existing
+            : new CacheEntry { Hash = hash };
+
+    private static void PersistCacheIfDirty()
+    {
+        lock (CacheLock)
+        {
+            if (!_cacheDirty)
+            {
+                return;
+            }
+            try
+            {
+                SaveCache();
+                _cacheDirty = false;
+            }
+            catch (Exception ex)
+            {
+                Logs.Warning($"Quarry: failed to persist dataset cache: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>Writes the whole cache to disk via a temp file + atomic move. Caller holds <see cref="CacheLock"/>.</summary>
+    private static void SaveCache()
+    {
+        JObject datasets = [];
+        foreach ((string key, CacheEntry entry) in Cache)
+        {
+            JObject obj = new() { ["hash"] = entry.Hash };
+            if (entry.Schema is not null)
+            {
+                JArray columns = [];
+                foreach (ColumnInfo column in entry.Schema.Columns)
+                {
+                    columns.Add(new JObject { ["name"] = column.Name, ["kind"] = column.Kind.ToString() });
+                }
+                obj["schema"] = columns;
+            }
+            if (entry.HasRowCount)
+            {
+                obj["rowCountColumn"] = entry.RowCountColumn;
+                obj["rowCount"] = entry.RowCount;
+            }
+            if (entry.Preview is not null)
+            {
+                obj["preview"] = new JObject
+                {
+                    ["limit"] = entry.Preview.Limit,
+                    ["columns"] = ToJArray(entry.Preview.Columns),
+                    ["rows"] = ToRowsArray(entry.Preview.Rows),
+                };
+            }
+            datasets[key] = obj;
+        }
+        JObject root = new() { ["version"] = CacheVersion, ["datasets"] = datasets };
+        string directory = Path.GetDirectoryName(CacheFilePath);
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+        string temp = $"{CacheFilePath}.tmp";
+        File.WriteAllText(temp, root.ToString());
+        File.Move(temp, CacheFilePath, overwrite: true);
+    }
+
+    private static JArray ToJArray(IEnumerable<string> values)
+    {
+        JArray array = [];
+        foreach (string value in values)
+        {
+            array.Add(value);
+        }
+        return array;
+    }
+
+    private static JArray ToRowsArray(IEnumerable<List<string>> rows)
+    {
+        JArray array = [];
+        foreach (List<string> row in rows)
+        {
+            array.Add(ToJArray(row));
+        }
+        return array;
+    }
+
+    /// <summary>Loads the persisted cache into memory. Best-effort: a missing, unreadable, or wrong-version
+    /// file just leaves the cache empty (everything is recomputed on demand). Stored hashes are re-validated
+    /// against the live files during <see cref="Sync"/>, so a stale entry can never be served.</summary>
+    private static void LoadCache()
+    {
+        try
+        {
+            if (!File.Exists(CacheFilePath))
+            {
+                return;
+            }
+            JObject root = JObject.Parse(File.ReadAllText(CacheFilePath));
+            if (root.Value<int?>("version") != CacheVersion || root["datasets"] is not JObject datasets)
+            {
+                return;
+            }
+            foreach (JProperty property in datasets.Properties())
+            {
+                if (property.Value is not JObject obj)
+                {
+                    continue;
+                }
+                string hash = obj.Value<string>("hash");
+                if (string.IsNullOrEmpty(hash))
+                {
+                    continue;
+                }
+                Cache[property.Name] = new CacheEntry
+                {
+                    Hash = hash,
+                    Schema = ReadSchema(obj["schema"] as JArray),
+                    HasRowCount = obj["rowCount"] is not null,
+                    RowCountColumn = obj.Value<string>("rowCountColumn") ?? "",
+                    RowCount = obj.Value<long?>("rowCount") ?? 0,
+                    Preview = ReadPreview(obj["preview"] as JObject),
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"Quarry: failed to load dataset cache: {ex.Message}");
+        }
+    }
+
+    private static ColumnSchema ReadSchema(JArray columns)
+    {
+        if (columns is null)
+        {
+            return null;
+        }
+        List<ColumnInfo> result = [];
+        foreach (JToken token in columns)
+        {
+            string name = token.Value<string>("name");
+            if (string.IsNullOrEmpty(name))
+            {
+                continue;
+            }
+            ColumnKind kind = string.Equals(token.Value<string>("kind"), nameof(ColumnKind.List), StringComparison.OrdinalIgnoreCase)
+                ? ColumnKind.List
+                : ColumnKind.Scalar;
+            result.Add(new ColumnInfo(name, kind));
+        }
+        return new ColumnSchema(result);
+    }
+
+    private static PreviewData ReadPreview(JObject preview)
+    {
+        if (preview is null)
+        {
+            return null;
+        }
+        int limit = preview.Value<int?>("limit") ?? 0;
+        List<string> columns = preview["columns"] is JArray cols
+            ? [.. cols.Select(c => c.Value<string>() ?? "")]
+            : [];
+        List<List<string>> rows = [];
+        if (preview["rows"] is JArray rowArr)
+        {
+            foreach (JToken row in rowArr)
+            {
+                rows.Add(row is JArray cells ? [.. cells.Select(c => c.Value<string>() ?? "")] : []);
+            }
+        }
+        return new PreviewData(limit, columns, rows);
+    }
+    #endregion
 }
 
 /// <summary>Settings-UI view of one dataset: its columns, the resolved prompt column (what would be used

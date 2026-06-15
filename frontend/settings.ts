@@ -70,7 +70,7 @@ export const renderDatasetRow = (dataset: DatasetDto): string => {
         <td><code class="quarry-dataset-name">${name}</code></td>
         <td><select class="quarry-dataset-column" data-dataset="${name}">${renderDatasetOptions(dataset)}</select></td>
         <td class="quarry-dataset-tags" title="Columns the 'tags' keyword searches across">${renderTagCheckboxes(dataset)}</td>
-        <td class="quarry-dataset-rows" title="${formatRowCount(dataset.rowCount)} rows with a non-empty prompt (usable picks)">${formatRowCount(dataset.rowCount)}</td>
+        <td class="quarry-dataset-rows" data-dataset="${name}" title="Usable picks (rows with a non-empty prompt) — loads when you preview this dataset">${formatRowCount(dataset.rowCount)}</td>
         <td><button type="button" class="basic-button quarry-preview-button" data-dataset="${name}" title="Preview the first ${PREVIEW_ROW_LIMIT} rows">👁 Preview</button></td>
     </tr>`;
 };
@@ -354,6 +354,17 @@ const hidePreviewModal = (): void => {
     }
 };
 
+/// Fills in the lazily-loaded row count for a dataset wherever it is shown (the settings table's "Rows"
+/// cell). The count arrives with the preview response, so this runs once the user has previewed the dataset.
+const applyRowCount = (dataset: string, count: number | null): void => {
+    const selector = `td.quarry-dataset-rows[data-dataset="${dataset.replace(/(["\\])/g, "\\$1")}"]`;
+    for (const cell of Array.from(
+        document.querySelectorAll<HTMLElement>(selector),
+    )) {
+        cell.textContent = formatRowCount(count);
+    }
+};
+
 export const openPreview = (dataset: string): void => {
     ensurePreviewModal();
     const titleEl = document.getElementById(PREVIEW_TITLE_ID);
@@ -373,10 +384,15 @@ export const openPreview = (dataset: string): void => {
                 return;
             }
             if (data.success) {
-                bodyEl.innerHTML = renderPreviewTable(
-                    data.columns ?? [],
-                    data.rows ?? [],
-                );
+                const count = data.rowCount ?? null;
+                applyRowCount(dataset, count);
+                const summary =
+                    count == null
+                        ? ""
+                        : `<div class="quarry-preview-summary">${formatRowCount(count)} usable row(s) with a non-empty prompt.</div>`;
+                bodyEl.innerHTML =
+                    summary +
+                    renderPreviewTable(data.columns ?? [], data.rows ?? []);
             } else {
                 bodyEl.innerHTML = `<div class="quarry-preview-error">${escapeHtml(data.error ?? "Failed to load preview.")}</div>`;
             }

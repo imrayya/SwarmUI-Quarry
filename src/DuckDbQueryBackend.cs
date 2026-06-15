@@ -4,48 +4,41 @@ namespace Quarry;
 
 /// <summary>DuckDB-backed implementation of <see cref="IWildcardQueryBackend"/>. Reads any DuckDB-supported
 /// dataset (CSV/JSON/JSONL/Parquet natively, Lance via the <c>lance</c> extension) chosen by
-/// <see cref="DatasetSource"/>. Keeps one in-memory DuckDB connection alive, lazily loading the lance
-/// extension the first time a <c>.lance</c> dataset is queried. All access is serialized by a lock
-/// (a single DuckDB connection is not safe for concurrent commands); v1 favors correctness over throughput.</summary>
+/// <see cref="DatasetSource"/>. A single long-lived <see cref="Conn"/> serves all interactive previews and
+/// wildcard generation, serialized by a lock (a single DuckDB connection is not safe for concurrent
+/// commands). Bulk cache warming instead fans out over a short-lived pool of independent connections via
+/// <see cref="RunPooled"/>, which never touches the shared connection. v1 favors correctness over throughput
+/// on the shared path.</summary>
 public sealed class DuckDbQueryBackend : IWildcardQueryBackend, IDisposable
 {
-    private DuckDBConnection _connection;
-    private readonly object _lock = new();
-    private bool _lanceLoaded;
-
-    public DuckDbQueryBackend()
+    /// <summary>One DuckDB connection plus its own lazily-loaded <c>lance</c> flag and the queries that run
+    /// on it. NOT thread-safe: every <see cref="Conn"/> is driven by exactly one thread at a time — the
+    /// shared instance under the backend lock, a pooled instance by its owning warm worker.</summary>
+    private sealed class Conn : IDatasetReader, IDisposable
     {
-        OpenConnection();
-    }
+        private DuckDBConnection _connection;
+        private bool _lanceLoaded;
 
-    private void OpenConnection()
-    {
-        _connection = new DuckDBConnection("DataSource=:memory:");
-        _connection.Open();
-        // Keep row order deterministic so LIMIT/OFFSET selection is reproducible for a given dataset.
-        Execute("SET preserve_insertion_order = true;");
-        _lanceLoaded = false;
-    }
+        public Conn() => Open();
 
-    /// <summary>Disposes and rebuilds the connection, dropping all cached dataset metadata. This is the
-    /// in-process equivalent of restarting: the Lance reader caches a dataset's manifest (its list of
-    /// <c>data/&lt;uuid&gt;.lance</c> fragment files) for the life of the connection, so after a dataset is
-    /// deleted and regenerated on disk the old connection keeps trying to read the now-missing fragments
-    /// ("Failed to read next Lance RecordBatch ... not found"). Callers invoke this when the on-disk
-    /// datasets change. Serialized with queries via the same lock, so it is safe while others may be
-    /// querying — the in-flight query finishes on the old connection before it is torn down.</summary>
-    public void Reset()
-    {
-        lock (_lock)
+        private void Open()
+        {
+            _connection = new DuckDBConnection("DataSource=:memory:");
+            _connection.Open();
+            // Keep row order deterministic so LIMIT/OFFSET selection is reproducible for a given dataset.
+            Execute("SET preserve_insertion_order = true;");
+            _lanceLoaded = false;
+        }
+
+        /// <summary>Disposes and rebuilds the connection, dropping all cached dataset metadata (notably stale
+        /// Lance manifests pointing at regenerated, now-missing fragment files).</summary>
+        public void Reset()
         {
             _connection.Dispose();
-            OpenConnection();
+            Open();
         }
-    }
 
-    public ColumnSchema GetSchema(string datasetPath)
-    {
-        lock (_lock)
+        public ColumnSchema GetSchema(string datasetPath)
         {
             DatasetSource source = PrepareSource(datasetPath);
             using DuckDBCommand cmd = _connection.CreateCommand();
@@ -62,11 +55,8 @@ public sealed class DuckDbQueryBackend : IWildcardQueryBackend, IDisposable
             }
             return new ColumnSchema(columns);
         }
-    }
 
-    public long CountRows(string datasetPath, SqlFilter filter)
-    {
-        lock (_lock)
+        public long CountRows(string datasetPath, SqlFilter filter)
         {
             DatasetSource source = PrepareSource(datasetPath);
             using DuckDBCommand cmd = _connection.CreateCommand();
@@ -74,11 +64,8 @@ public sealed class DuckDbQueryBackend : IWildcardQueryBackend, IDisposable
             Bind(cmd, filter);
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-    }
 
-    public string GetPromptAt(string datasetPath, string promptColumn, SqlFilter filter, long index)
-    {
-        lock (_lock)
+        public string GetPromptAt(string datasetPath, string promptColumn, SqlFilter filter, long index)
         {
             DatasetSource source = PrepareSource(datasetPath);
             using DuckDBCommand cmd = _connection.CreateCommand();
@@ -88,15 +75,8 @@ public sealed class DuckDbQueryBackend : IWildcardQueryBackend, IDisposable
             object result = cmd.ExecuteScalar();
             return result is null or DBNull ? "" : result.ToString();
         }
-    }
 
-    /// <summary>Reads the first <paramref name="limit"/> rows of a dataset (all columns) for the preview UI.
-    /// Returns the column names in dataset order and one stringified value per cell (nulls become empty
-    /// strings, lists/arrays render as <c>[a, b, c]</c>). <paramref name="limit"/> must be a non-negative
-    /// integer; callers are responsible for clamping it to a sane ceiling.</summary>
-    public (List<string> Columns, List<List<string>> Rows) GetSampleRows(string datasetPath, int limit)
-    {
-        lock (_lock)
+        public (List<string> Columns, List<List<string>> Rows) GetSampleRows(string datasetPath, int limit)
         {
             DatasetSource source = PrepareSource(datasetPath);
             using DuckDBCommand cmd = _connection.CreateCommand();
@@ -119,6 +99,119 @@ public sealed class DuckDbQueryBackend : IWildcardQueryBackend, IDisposable
             }
             return (columns, rows);
         }
+
+        private DatasetSource PrepareSource(string datasetPath)
+        {
+            DatasetSource source = DatasetSource.Resolve(datasetPath);
+            if (source.RequiresLance)
+            {
+                EnsureLanceLoaded();
+            }
+            return source;
+        }
+
+        private void EnsureLanceLoaded()
+        {
+            if (_lanceLoaded)
+            {
+                return;
+            }
+            Execute("INSTALL lance; LOAD lance;");
+            _lanceLoaded = true;
+        }
+
+        private void Execute(string sql)
+        {
+            using DuckDBCommand cmd = _connection.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.ExecuteNonQuery();
+        }
+
+        public void Dispose() => _connection.Dispose();
+    }
+
+    /// <summary>The single connection backing all interactive previews and wildcard generation.</summary>
+    private readonly Conn _shared = new();
+
+    /// <summary>Serializes commands on <see cref="_shared"/> (a single DuckDB connection is not safe for
+    /// concurrent commands). The warm pool does not take this lock — it uses its own connections.</summary>
+    private readonly object _lock = new();
+
+    public ColumnSchema GetSchema(string datasetPath)
+    {
+        lock (_lock)
+        {
+            return _shared.GetSchema(datasetPath);
+        }
+    }
+
+    public long CountRows(string datasetPath, SqlFilter filter)
+    {
+        lock (_lock)
+        {
+            return _shared.CountRows(datasetPath, filter);
+        }
+    }
+
+    public string GetPromptAt(string datasetPath, string promptColumn, SqlFilter filter, long index)
+    {
+        lock (_lock)
+        {
+            return _shared.GetPromptAt(datasetPath, promptColumn, filter, index);
+        }
+    }
+
+    /// <summary>Reads the first <paramref name="limit"/> rows of a dataset (all columns) for the preview UI.
+    /// See <see cref="Conn.GetSampleRows"/>. <paramref name="limit"/> must be non-negative; callers clamp it.</summary>
+    public (List<string> Columns, List<List<string>> Rows) GetSampleRows(string datasetPath, int limit)
+    {
+        lock (_lock)
+        {
+            return _shared.GetSampleRows(datasetPath, limit);
+        }
+    }
+
+    /// <summary>Rebuilds the shared connection, dropping its cached dataset metadata. Callers invoke this when
+    /// the on-disk datasets change (regenerated Lance fragments etc.). Serialized with shared-connection
+    /// queries via the lock. The warm pool's connections are short-lived, so there is nothing else to reset.</summary>
+    public void Reset()
+    {
+        lock (_lock)
+        {
+            _shared.Reset();
+        }
+    }
+
+    /// <summary>Runs read-only <paramref name="jobs"/> across up to <paramref name="maxParallelism"/>
+    /// short-lived, independent DuckDB connections (one per worker thread, pulling jobs off a shared queue).
+    /// Each job is handed an <see cref="IDatasetReader"/> bound to a single connection and is only ever called
+    /// on that worker's thread, so the per-connection "one command at a time" rule holds; DuckDB itself allows
+    /// concurrent read-only connections. Used for bulk cache warming. Connections are created on entry and
+    /// disposed on exit — there is no long-lived pool to keep in sync with <see cref="Reset"/>, and the shared
+    /// interactive connection is never touched, so previews/generation run in parallel with a warm. Blocks
+    /// until every job has completed. A job that throws is its own responsibility to handle; an unhandled
+    /// throw faults the run.</summary>
+    public void RunPooled(IReadOnlyList<Action<IDatasetReader>> jobs, int maxParallelism)
+    {
+        if (jobs is null || jobs.Count == 0)
+        {
+            return;
+        }
+        int workers = Math.Clamp(maxParallelism, 1, jobs.Count);
+        ConcurrentQueue<Action<IDatasetReader>> queue = new(jobs);
+        Task[] tasks = new Task[workers];
+        for (int i = 0; i < workers; i++)
+        {
+            tasks[i] = Task.Run(() =>
+            {
+                using Conn conn = new();
+                while (queue.TryDequeue(out Action<IDatasetReader> job))
+                {
+                    job(conn);
+                }
+            });
+        }
+        Task.WaitAll(tasks);
     }
 
     /// <summary>Renders a DuckDB cell value as a display string: null/DBNull → "", a list/array →
@@ -151,38 +244,14 @@ public sealed class DuckDbQueryBackend : IWildcardQueryBackend, IDisposable
         }
     }
 
-    private DatasetSource PrepareSource(string datasetPath)
-    {
-        DatasetSource source = DatasetSource.Resolve(datasetPath);
-        if (source.RequiresLance)
-        {
-            EnsureLanceLoaded();
-        }
-        return source;
-    }
-
-    private void EnsureLanceLoaded()
-    {
-        if (_lanceLoaded)
-        {
-            return;
-        }
-        Execute("INSTALL lance; LOAD lance;");
-        _lanceLoaded = true;
-    }
-
-    private void Execute(string sql)
-    {
-        using DuckDBCommand cmd = _connection.CreateCommand();
-        cmd.CommandText = sql;
-        cmd.ExecuteNonQuery();
-    }
-
     /// <summary>Double-quotes a SQL identifier (column name), escaping embedded quotes by doubling.</summary>
     private static string QuoteIdentifier(string identifier) => $"\"{identifier.Replace("\"", "\"\"")}\"";
 
     public void Dispose()
     {
-        _connection.Dispose();
+        lock (_lock)
+        {
+            _shared.Dispose();
+        }
     }
 }

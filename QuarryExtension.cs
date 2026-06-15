@@ -121,10 +121,10 @@ public class QuarryExtension : Extension
     #endregion
 
     #region API endpoints
-    private static JObject BuildSettingsResponse()
+    private static JObject BuildSettingsResponse(bool includeRowCounts = false)
     {
         JArray datasets = [];
-        foreach (DatasetInfo info in DatasetManager.GetDatasetsInfo())
+        foreach (DatasetInfo info in DatasetManager.GetDatasetsInfo(includeRowCounts))
         {
             JArray columns = [];
             foreach (ColumnInfo column in info.Columns)
@@ -189,15 +189,19 @@ public class QuarryExtension : Extension
         {
             return Task.FromResult(new JObject { ["success"] = false, ["error"] = error });
         }
-        JObject response = BuildSettingsResponse();
-        response["message"] = message;
+        // Warm the cache (schema + row count + preview for every changed/uncached dataset) so the table can
+        // show counts now and later previews are instant. After warming, the counts come from the cache, so
+        // asking for them here is cheap (no fresh scans).
+        int warmed = DatasetManager.WarmAll();
+        JObject response = BuildSettingsResponse(includeRowCounts: true);
+        response["message"] = warmed > 0 ? $"{message} Warmed {warmed} dataset(s)." : message;
         response["count"] = count;
         return Task.FromResult(response);
     }
 
-    public Task<JObject> QuarryPreviewDataset(Session session, string dataset, int limit = 100)
+    public Task<JObject> QuarryPreviewDataset(Session session, string dataset, int limit = DatasetManager.DefaultPreviewLimit)
     {
-        int clamped = Math.Clamp(limit <= 0 ? 100 : limit, 1, 1000);
+        int clamped = Math.Clamp(limit <= 0 ? DatasetManager.DefaultPreviewLimit : limit, 1, 1000);
         (bool success, List<string> columns, List<List<string>> rows, string error) = DatasetManager.PreviewDataset(dataset, clamped);
         if (!success)
         {
@@ -218,13 +222,21 @@ public class QuarryExtension : Extension
             }
             rowsArr.Add(rowArr);
         }
-        return Task.FromResult(new JObject
+        JObject response = new()
         {
             ["success"] = true,
             ["dataset"] = dataset,
             ["columns"] = columnsArr,
             ["rows"] = rowsArr,
-        });
+        };
+        // The usable-pick row count is loaded lazily here (on preview) rather than eagerly for every dataset
+        // at startup. Best-effort: a count failure must not hide the sample rows we already read.
+        (bool countSuccess, long? rowCount, _) = DatasetManager.GetUsableRowCount(dataset);
+        if (countSuccess && rowCount is not null)
+        {
+            response["rowCount"] = rowCount.Value;
+        }
+        return Task.FromResult(response);
     }
 
     /// <summary>Given the current prompt text, returns the wildcard names of the Quarry datasets it references,
