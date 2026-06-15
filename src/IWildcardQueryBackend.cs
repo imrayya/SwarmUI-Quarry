@@ -13,4 +13,12 @@ public interface IWildcardQueryBackend
     /// <summary>Returns the <paramref name="promptColumn"/> value of the matching row at the given
     /// zero-based <paramref name="index"/> in stable order. Returns "" if the cell is null or out of range.</summary>
     string GetPromptAt(string datasetPath, string promptColumn, SqlFilter filter, long index);
+
+    /// <summary>Returns the <paramref name="promptColumn"/> value of the row at the given zero-based
+    /// <em>unfiltered</em> <paramref name="index"/> in stable order, plus whether that row satisfies
+    /// <paramref name="filter"/>. The filter is evaluated as a projected expression rather than a WHERE
+    /// clause, so the seek stays a native O(1) pushdown — the primitive the wildcard handler's rejection
+    /// sampler uses to find a matching row by cheap random seeks instead of a filtered OFFSET scan. Returns
+    /// ("", false) for an out-of-range index.</summary>
+    (string Value, bool Matches) GetCandidateAt(string datasetPath, string promptColumn, SqlFilter filter, long index);
 }

@@ -107,6 +107,26 @@ public sealed class DuckDbQueryBackend : IWildcardQueryBackend, IDisposable
             return result is null or DBNull ? "" : result.ToString();
         }
 
+        public (string Value, bool Matches) GetCandidateAt(string datasetPath, string promptColumn, SqlFilter filter, long index)
+        {
+            DatasetSource source = PrepareSource(datasetPath);
+            using DuckDBCommand cmd = _connection.CreateCommand();
+            // Evaluate the filter as a SELECT-list expression over a single UNFILTERED row — not a WHERE clause
+            // — so the LIMIT/OFFSET still pushes down to a native O(1) Lance seek (a WHERE would defeat it).
+            string matchExpr = filter.IsEmpty ? "TRUE" : $"({filter.WhereClause})";
+            cmd.CommandText =
+                $"SELECT {QuoteIdentifier(promptColumn)}, {matchExpr} FROM {source.FromExpression} LIMIT 1 OFFSET {index};";
+            Bind(cmd, filter);
+            using DuckDBDataReader reader = cmd.ExecuteReader();
+            if (!reader.Read())
+            {
+                return ("", false);
+            }
+            string value = reader.IsDBNull(0) ? "" : reader.GetValue(0)?.ToString() ?? "";
+            bool matches = !reader.IsDBNull(1) && Convert.ToBoolean(reader.GetValue(1));
+            return (value, matches);
+        }
+
         public (List<string> Columns, List<List<string>> Rows) GetSampleRows(string datasetPath, int limit)
         {
             DatasetSource source = PrepareSource(datasetPath);
@@ -210,6 +230,19 @@ public sealed class DuckDbQueryBackend : IWildcardQueryBackend, IDisposable
         lock (_lock)
         {
             return _shared.GetPromptAt(datasetPath, promptColumn, filter, index);
+        }
+    }
+
+    /// <summary>Fetches the prompt at an <em>unfiltered</em> row index plus whether that row matches
+    /// <paramref name="filter"/> — a native O(1) Lance seek (the filter is projected, not a WHERE, so the
+    /// OFFSET pushes down). The handler's rejection sampler uses this to find a matching row by cheap random
+    /// seeks instead of a filtered OFFSET scan. See <see cref="Conn.GetCandidateAt"/>. Serialized on the
+    /// shared connection like the other interactive reads.</summary>
+    public (string Value, bool Matches) GetCandidateAt(string datasetPath, string promptColumn, SqlFilter filter, long index)
+    {
+        lock (_lock)
+        {
+            return _shared.GetCandidateAt(datasetPath, promptColumn, filter, index);
         }
     }
 

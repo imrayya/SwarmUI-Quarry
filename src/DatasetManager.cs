@@ -53,6 +53,14 @@ public static class DatasetManager
     // Per-file derived data (schema, usable row count, preview sample), all keyed by the file's hash and
     // persisted to disk so a restart doesn't recompute them for unchanged files. See the Persistent cache region.
     private static readonly ConcurrentDictionary<string, CacheEntry> Cache = new();
+    // Cache of filtered (queried) row counts, keyed by dataset name + file hash + the filter's canonical key.
+    // A <q:...[filter]> count is a live full scan — the filter defeats both the cached invariant total and
+    // Lance's count pushdown — and over a `*` glob it scans every matched dataset (tens of GB of tag/prompt
+    // text), which is the dominant cost of a cold filtered query. So this is PERSISTED to disk (see
+    // SaveCache/LoadCache): recomputing it on every restart was measured at up to ~a minute on a cold cache.
+    // The hash is part of the key, so a changed file can never serve a stale count; entries for changed or
+    // removed datasets are pruned in Sync.
+    private static readonly ConcurrentDictionary<string, long> FilteredCounts = new();
     private static readonly object CacheLock = new();
     private static volatile bool _cacheDirty;
     // Bumped on any incompatible change to the on-disk cache format; a mismatch discards the file and rebuilds.
@@ -234,6 +242,116 @@ public static class DatasetManager
         long count = Backend.CountRows(entry.Path, SqlFilter.None);
         StoreRowCount(key, entry.FileHash, column, count);
         return count;
+    }
+
+    /// <summary>A cache key for a dataset's filtered row count: its name, current file hash, and the filter's
+    /// canonical key, so a changed file or a different filter never reuses a stale count.</summary>
+    private static string FilteredCountKey(DatasetEntry entry, SqlFilter filter)
+        => $"{entry.WildcardName.ToLowerFast()}|{entry.FileHash}|{filter.CacheKey}";
+
+    /// <summary>Reads a dataset's filtered row count from the session cache only, never scanning. False when no
+    /// count is cached for this file's current hash and this exact filter (never queried, file changed, or its
+    /// count failed during a parallel warm).</summary>
+    public static bool TryGetFilteredCount(DatasetEntry entry, SqlFilter filter, out long count)
+        => FilteredCounts.TryGetValue(FilteredCountKey(entry, filter), out count);
+
+    /// <summary>The number of rows matching <paramref name="filter"/> in a dataset, cached for the file's
+    /// current hash. On a miss it scans once on the shared connection and caches the result, so later identical
+    /// queries (and other images in the same run) are free. For a fan-out over many datasets, call
+    /// <see cref="WarmFilteredCounts"/> first to populate the cache in parallel instead of serializing the
+    /// scans here.</summary>
+    public static long CountRowsFiltered(DatasetEntry entry, SqlFilter filter)
+    {
+        string key = FilteredCountKey(entry, filter);
+        if (FilteredCounts.TryGetValue(key, out long cached))
+        {
+            return cached;
+        }
+        long count = Backend.CountRows(entry.Path, filter);
+        FilteredCounts[key] = count;
+        _cacheDirty = true;
+        PersistCacheIfDirty();
+        return count;
+    }
+
+    /// <summary>Pre-computes the filtered row counts for the (dataset, filter) pairs that aren't already
+    /// cached, fanning the scans out across a small pool of independent DuckDB connections instead of
+    /// serializing them on the shared connection. This is what lets a filtered <c>&lt;q:*[...]&gt;</c> over
+    /// many datasets finish in roughly the time of its slowest single dataset rather than the sum of them all:
+    /// each dataset's count is an independent read-only scan. Best-effort — a dataset whose count throws is
+    /// logged and left uncached, so the caller (via <see cref="TryGetFilteredCount"/>) simply skips it. A
+    /// single uncached pair skips the pool and counts on the shared connection.</summary>
+    public static void WarmFilteredCounts(IReadOnlyList<(DatasetEntry Entry, SqlFilter Filter)> requests)
+    {
+        List<(DatasetEntry Entry, SqlFilter Filter)> misses = [];
+        foreach ((DatasetEntry Entry, SqlFilter Filter) request in requests)
+        {
+            if (!request.Filter.IsEmpty && !FilteredCounts.ContainsKey(FilteredCountKey(request.Entry, request.Filter)))
+            {
+                misses.Add(request);
+            }
+        }
+        if (misses.Count == 0)
+        {
+            return;
+        }
+        if (misses.Count == 1)
+        {
+            // A single scan isn't worth spinning up a connection pool; count it on the shared connection.
+            try
+            {
+                CountRowsFiltered(misses[0].Entry, misses[0].Filter);
+            }
+            catch (Exception ex)
+            {
+                Logs.Debug($"Quarry: filtered count failed for '{misses[0].Entry.WildcardName}': {ex.Message}");
+            }
+            return;
+        }
+        int parallelism = Math.Clamp(Environment.ProcessorCount / 2, 2, 6);
+        List<Action<IDatasetReader>> jobs = [];
+        foreach ((DatasetEntry entry, SqlFilter filter) in misses)
+        {
+            jobs.Add(reader =>
+            {
+                try
+                {
+                    FilteredCounts[FilteredCountKey(entry, filter)] = reader.CountRows(entry.Path, filter);
+                    _cacheDirty = true;
+                }
+                catch (Exception ex)
+                {
+                    Logs.Debug($"Quarry: filtered count failed for '{entry.WildcardName}': {ex.Message}");
+                }
+            });
+        }
+        Backend.RunPooled(jobs, parallelism);
+        // Persist the freshly-scanned counts so a restart (or cache-clear) never re-scans every matched dataset
+        // again — that cold rescan of tens of GB is the dominant cost of a filtered <q:*[...]> query.
+        PersistCacheIfDirty();
+    }
+
+    /// <summary>Drops filtered-count cache entries that no longer match a live dataset's current hash (the file
+    /// changed, was removed, or was renamed), so the session cache can't grow unbounded across re-syncs. Called
+    /// from Sync. Keys are <c>name|hash|filterKey</c>; only the first two segments are needed to validate.</summary>
+    private static void PruneFilteredCounts()
+    {
+        foreach (string key in FilteredCounts.Keys.ToList())
+        {
+            int firstSep = key.IndexOf('|');
+            int secondSep = firstSep < 0 ? -1 : key.IndexOf('|', firstSep + 1);
+            if (secondSep < 0)
+            {
+                FilteredCounts.TryRemove(key, out _);
+                continue;
+            }
+            string name = key[..firstSep];
+            string hash = key[(firstSep + 1)..secondSep];
+            if (!Datasets.TryGetValue(name, out DatasetEntry entry) || entry.FileHash != hash)
+            {
+                FilteredCounts.TryRemove(key, out _);
+            }
+        }
     }
 
     /// <summary>Reads a dataset's usable-pick row count from the cache only, never scanning. Returns false when
@@ -491,6 +609,8 @@ public static class DatasetManager
             {
                 _backend?.Reset();
             }
+            // Drop session filtered-count entries for datasets that changed or disappeared above.
+            PruneFilteredCounts();
             // Persist any cache pruning (changed/removed files) done above.
             PersistCacheIfDirty();
             Logs.Info($"Quarry: synced {Datasets.Count} dataset(s).");
@@ -643,7 +763,14 @@ public static class DatasetManager
             }
             datasets[key] = obj;
         }
-        JObject root = new() { ["version"] = CacheVersion, ["datasets"] = datasets };
+        // Persist the filtered (queried) row counts too — keyed by name|hash|filterKey, hash-invalidated like
+        // the rest — so a cold start doesn't re-scan every matched dataset for a filter already computed once.
+        JObject filteredCounts = [];
+        foreach ((string filterKey, long value) in FilteredCounts)
+        {
+            filteredCounts[filterKey] = value;
+        }
+        JObject root = new() { ["version"] = CacheVersion, ["datasets"] = datasets, ["filteredCounts"] = filteredCounts };
         string directory = Path.GetDirectoryName(CacheFilePath);
         if (!string.IsNullOrEmpty(directory))
         {
@@ -710,6 +837,20 @@ public static class DatasetManager
                     RowCount = obj.Value<long?>("rowCount") ?? 0,
                     Preview = ReadPreview(obj["preview"] as JObject),
                 };
+            }
+            // Filtered counts persisted alongside the per-dataset cache (absent in pre-existing files → just
+            // recomputed on demand). Stale entries (changed/removed datasets) are dropped by PruneFilteredCounts
+            // during Sync, and the hash in each key prevents a changed file from ever serving an old count.
+            if (root["filteredCounts"] is JObject filteredCounts)
+            {
+                foreach (JProperty property in filteredCounts.Properties())
+                {
+                    long? value = property.Value?.Value<long?>();
+                    if (value is not null)
+                    {
+                        FilteredCounts[property.Name] = value.Value;
+                    }
+                }
             }
         }
         catch (Exception ex)

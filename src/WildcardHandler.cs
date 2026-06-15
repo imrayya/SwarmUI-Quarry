@@ -26,9 +26,10 @@ public static class WildcardHandler
         T2IPromptHandling.PromptTagLengthEstimators[TagPrefix] = Estimator;
     }
 
-    /// <summary>One file matched by a reference: where to read its prompt from, the WHERE filter built for
-    /// this query against its schema, and how many rows pass that filter.</summary>
-    private sealed record MatchedDataset(DatasetEntry Entry, string PromptColumn, SqlFilter Filter, long Count);
+    /// <summary>One file matched by a reference: where to read its prompt from, the WHERE filter built for this
+    /// query against its schema, how many rows pass that filter (<paramref name="Count"/>), and the dataset's
+    /// total row count (<paramref name="Total"/> — used to gauge filter selectivity when sampling a row).</summary>
+    private sealed record MatchedDataset(DatasetEntry Entry, string PromptColumn, SqlFilter Filter, long Count, long Total);
 
     private static string Processor(string data, T2IPromptHandling.PromptTagContext context)
     {
@@ -152,13 +153,15 @@ public static class WildcardHandler
 
     private static string ProcessTargets(WildcardQuery query, List<DatasetEntry> targets, bool multi, T2IPromptHandling.PromptTagContext context)
     {
-        List<MatchedDataset> matched = [];
+        // Pass 1 (cheap, no scanning): resolve each target's prompt column and build its filter from the
+        // cached schema — just enough to know which datasets need a (possibly costly) filtered count.
+        List<PlanDraft> drafts = [];
         foreach (DatasetEntry entry in targets)
         {
-            MatchedDataset plan;
+            PlanDraft draft;
             try
             {
-                plan = Plan(query, entry, context);
+                draft = DraftPlan(query, entry, context);
             }
             catch (Exception ex) when (multi)
             {
@@ -167,10 +170,41 @@ public static class WildcardHandler
                 Logs.Debug($"Quarry: skipping '{entry.WildcardName}' in '{query.Name}': {ex.Message}");
                 continue;
             }
-            if (plan is not null && plan.Count > 0)
+            if (draft is not null)
             {
-                matched.Add(plan);
+                drafts.Add(draft);
             }
+        }
+        // A filtered count is a live scan (the filter defeats both the cached total and Lance's count
+        // pushdown). For a fan-out, pre-compute those scans in parallel and cache them, so the whole query
+        // costs about its slowest single dataset instead of the sum of every matched dataset's scan.
+        if (multi)
+        {
+            DatasetManager.WarmFilteredCounts([.. drafts.Where(draft => !draft.Filter.IsEmpty).Select(draft => (draft.Entry, draft.Filter))]);
+        }
+        // Pass 2: size each dataset's pick pool from the (now warm) counts.
+        List<MatchedDataset> matched = [];
+        foreach (PlanDraft draft in drafts)
+        {
+            MatchedDataset plan;
+            try
+            {
+                long count = ResolveCount(draft, multi);
+                if (count <= 0)
+                {
+                    continue;
+                }
+                // The unfiltered total (a cached metadata read) lets the fetch gauge filter selectivity; with
+                // no filter it equals the count, so there's nothing extra to read.
+                long totalRows = draft.Filter.IsEmpty ? count : DatasetManager.GetRowCount(draft.Entry, draft.PromptColumn);
+                plan = new MatchedDataset(draft.Entry, draft.PromptColumn, draft.Filter, count, totalRows);
+            }
+            catch (Exception ex) when (multi)
+            {
+                Logs.Debug($"Quarry: skipping '{draft.Entry.WildcardName}' in '{query.Name}': {ex.Message}");
+                continue;
+            }
+            matched.Add(plan);
         }
         if (matched.Count == 0)
         {
@@ -216,20 +250,11 @@ public static class WildcardHandler
                 int i = LocateDataset(offsets, globalIndex);
                 MatchedDataset m = matched[i];
                 long localIndex = globalIndex - offsets[i];
-                // Fetch the picked row. Datasets are blank-filtered at ingest, so the prompt column is
-                // non-empty — but a dataset added without that cleanup could still hold a blank row. Probe a
-                // few rows forward (deterministic, so it also holds under the Index seed behavior) so a stray
-                // blank doesn't surface as an empty expansion; the warning below is the last-resort backstop.
-                string value = "";
-                for (int probe = 0; probe < BlankProbeLimit && m.Count > 0; probe++)
-                {
-                    long row = (localIndex + probe) % m.Count;
-                    value = context.Parse(DatasetManager.Backend.GetPromptAt(m.Entry.Path, m.PromptColumn, m.Filter, row)).Trim();
-                    if (value.Length > 0)
-                    {
-                        break;
-                    }
-                }
+                // Fetch the picked row's prompt. A selective-enough filter samples a matching row by cheap
+                // random O(1) seeks (rejection sampling) instead of a filtered OFFSET scan; an empty or sparse
+                // filter uses the deterministic OFFSET fetch. Either path probes past a stray blank row (rare —
+                // datasets are blank-filtered at ingest); the warning below is the last-resort backstop.
+                string value = FetchPrompt(m, localIndex, globalIndex, context);
                 if (value.Length == 0)
                 {
                     Logs.Warning(
@@ -252,8 +277,14 @@ public static class WildcardHandler
         return result;
     }
 
-    /// <summary>Builds the per-file selection plan, or null when the file has no prompt column to read.</summary>
-    private static MatchedDataset Plan(WildcardQuery query, DatasetEntry entry, T2IPromptHandling.PromptTagContext context)
+    /// <summary>One target resolved far enough to size its pick pool: which file, where its prompt is, and the
+    /// WHERE filter built for this query against its (cached) schema. The row count is filled in separately
+    /// (Pass 2) so a fan-out's filtered counts can be computed in parallel.</summary>
+    private sealed record PlanDraft(DatasetEntry Entry, string PromptColumn, SqlFilter Filter);
+
+    /// <summary>The cheap, scan-free half of planning: resolves a target's prompt column and builds its filter
+    /// from the cached schema. Returns null (with a warning) when the file has no prompt column to read.</summary>
+    private static PlanDraft DraftPlan(WildcardQuery query, DatasetEntry entry, T2IPromptHandling.PromptTagContext context)
     {
         ColumnSchema schema = DatasetManager.GetSchema(entry);
         string promptColumn = PromptColumnResolver.Resolve(DatasetManager.GetConfiguredPromptColumn(entry.WildcardName), schema);
@@ -266,16 +297,28 @@ public static class WildcardHandler
         // column, so `[tags=…]` still works without any per-file setup.
         List<ColumnInfo> tagColumns = TagColumnResolver.Resolve(DatasetManager.GetConfiguredTagColumns(entry.WildcardName), schema, promptColumn);
         SqlFilter filter = SqlFilterBuilder.Build(query, schema, tagColumns);
-        // Size the pick pool. With no [query] filter (the common case) this is the dataset's invariant row
-        // total, served from the warmed cache — and the matching GetPromptAt fetch is then a bare LIMIT/OFFSET
-        // that DuckDB's lance scan pushes down to a native O(1) row seek. A non-empty [query] filter is
-        // dataset-specific, so it must be counted live and the fetch scans (inherent to filtering, and the
-        // uncommon path). Blank prompt rows are excluded at ingest, so the raw total is the usable-pick total;
-        // ProcessTargets still probes past any stray blank in a dataset that skipped that cleanup.
-        long count = filter.IsEmpty
-            ? DatasetManager.GetRowCount(entry, promptColumn)
-            : DatasetManager.Backend.CountRows(entry.Path, filter);
-        return new MatchedDataset(entry, promptColumn, filter, count);
+        return new PlanDraft(entry, promptColumn, filter);
+    }
+
+    /// <summary>Sizes a draft's pick pool. With no [query] filter (the common case) this is the dataset's
+    /// invariant row total from the warm cache — and the matching GetPromptAt fetch is then a bare LIMIT/OFFSET
+    /// that DuckDB's lance scan pushes down to a native O(1) row seek. A non-empty filter is dataset-specific:
+    /// in a fan-out (<paramref name="multi"/>) the count was pre-computed in parallel by
+    /// <see cref="DatasetManager.WarmFilteredCounts"/> and is read back here (a miss means that dataset's count
+    /// failed → 0, so it is dropped); a single explicit reference counts it directly so any error surfaces to
+    /// the user. Blank prompt rows are excluded at ingest, so the total is the usable-pick total;
+    /// ProcessTargets still probes past any stray blank in a dataset that skipped that cleanup.</summary>
+    private static long ResolveCount(PlanDraft draft, bool multi)
+    {
+        if (draft.Filter.IsEmpty)
+        {
+            return DatasetManager.GetRowCount(draft.Entry, draft.PromptColumn);
+        }
+        if (multi)
+        {
+            return DatasetManager.TryGetFilteredCount(draft.Entry, draft.Filter, out long count) ? count : 0;
+        }
+        return DatasetManager.CountRowsFiltered(draft.Entry, draft.Filter);
     }
 
     /// <summary>Finds the index of the file whose pooled row range contains <paramref name="globalIndex"/>.</summary>
@@ -289,6 +332,102 @@ public static class WildcardHandler
             }
         }
         return 0;
+    }
+
+    /// <summary>How many random unfiltered-row seeks the rejection sampler tries before falling back to the
+    /// deterministic filtered OFFSET fetch. Each seek is a cheap native O(1) Lance lookup, so this doubles as
+    /// the selectivity gate: a filter matching fewer than ~1/this of a dataset's rows is scanned directly
+    /// (random seeks would mostly miss) rather than sampled.</summary>
+    private const int RejectionMaxAttempts = 48;
+
+    /// <summary>Reads a picked row's prompt. With no filter this is a direct LIMIT/OFFSET seek (Lance pushes it
+    /// down to O(1)). With a selective-enough filter it samples a matching row by cheap random seeks
+    /// (<see cref="TryRejectionSample"/>) rather than the filtered OFFSET scan that must skip
+    /// <paramref name="localIndex"/> matches; a sparse filter, or sampling that finds no non-blank match, falls
+    /// back to <see cref="FetchByOffset"/>. Returns "" only when the dataset is empty or every probed row is
+    /// blank.</summary>
+    private static string FetchPrompt(MatchedDataset m, long localIndex, long globalIndex, T2IPromptHandling.PromptTagContext context)
+    {
+        if (m.Count <= 0)
+        {
+            return "";
+        }
+        if (!m.Filter.IsEmpty)
+        {
+            string sampled = TryRejectionSample(m, globalIndex, context);
+            if (sampled is not null)
+            {
+                return sampled;
+            }
+        }
+        return FetchByOffset(m, localIndex, context);
+    }
+
+    /// <summary>The deterministic OFFSET fetch: the <paramref name="localIndex"/>-th row that passes the filter
+    /// (or the localIndex-th row outright when there is no filter), probing a few rows forward past any stray
+    /// blank. A pure function of localIndex, so it reproduces under a fixed seed (including the Index seed
+    /// behavior). With a filter the seek scans to the offset (no pushdown); with none Lance pushes it to
+    /// O(1).</summary>
+    private static string FetchByOffset(MatchedDataset m, long localIndex, T2IPromptHandling.PromptTagContext context)
+    {
+        string value = "";
+        for (int probe = 0; probe < BlankProbeLimit && m.Count > 0; probe++)
+        {
+            long row = (localIndex + probe) % m.Count;
+            value = context.Parse(DatasetManager.Backend.GetPromptAt(m.Entry.Path, m.PromptColumn, m.Filter, row)).Trim();
+            if (value.Length > 0)
+            {
+                break;
+            }
+        }
+        return value;
+    }
+
+    /// <summary>Tries to pick a matching row by rejection sampling: draw random rows from the dataset's FULL
+    /// (unfiltered) range, fetch each with a cheap native O(1) seek, and accept the first that passes the filter
+    /// and is non-blank. Returns that prompt, or null to tell the caller to fall back to
+    /// <see cref="FetchByOffset"/> — either because the filter is too sparse to sample efficiently (over
+    /// <see cref="RejectionMaxAttempts"/> expected draws per hit) or because the bounded draws found no
+    /// non-blank match. Determinism: the candidate stream comes from a seed derived solely from
+    /// <paramref name="globalIndex"/> (itself a pure function of the wildcard seed) in its OWN RNG — so it
+    /// reproduces under a fixed seed yet never consumes from, or perturbs, the shared wildcard RNG that other
+    /// prompt tags draw from. It also yields a uniform pick over matching rows, matching the OFFSET fetch's
+    /// distribution.</summary>
+    private static string TryRejectionSample(MatchedDataset m, long globalIndex, T2IPromptHandling.PromptTagContext context)
+    {
+        // Selectivity gate: total/Count is the expected number of draws per match; sample only when a hit is
+        // expected within the attempt budget. Too sparse → let the caller scan instead.
+        if (m.Total <= 0 || m.Total > m.Count * (long)RejectionMaxAttempts)
+        {
+            return null;
+        }
+        Random random = new(RejectionSeed(globalIndex));
+        for (int attempt = 0; attempt < RejectionMaxAttempts; attempt++)
+        {
+            long candidate = random.NextInt64(m.Total);
+            (string raw, bool matches) = DatasetManager.Backend.GetCandidateAt(m.Entry.Path, m.PromptColumn, m.Filter, candidate);
+            if (!matches)
+            {
+                continue;
+            }
+            string value = context.Parse(raw).Trim();
+            if (value.Length > 0)
+            {
+                return value;
+            }
+            // A matching but blank row (rare — blanks are excluded at ingest); keep sampling.
+        }
+        return null;
+    }
+
+    /// <summary>A stable per-pick seed for the rejection sampler, derived only from the pick's pooled global
+    /// index so it is a pure function of the wildcard seed (reproducible) and isolated from the shared wildcard
+    /// RNG. A 64-bit mix (Fibonacci-hash multiply + xor-fold) decorrelates adjacent indices so neighboring
+    /// picks don't sample near-identical sequences.</summary>
+    private static int RejectionSeed(long globalIndex)
+    {
+        long mixed = unchecked(globalIndex * (long)0x9E3779B97F4A7C15UL);
+        return unchecked((int)(mixed ^ (mixed >> 32)));
     }
 
     /// <summary>Length estimate for a <c>&lt;q:...&gt;</c> tag. A queried dataset row can't be estimated cheaply

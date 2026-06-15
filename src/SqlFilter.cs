@@ -26,6 +26,15 @@ public sealed class SqlFilter
 
     public bool IsEmpty => WhereClause.Length == 0;
 
+    /// <summary>A stable, canonical key identifying this filter — its WHERE expression and its bound values in
+    /// order — for use as a cache key so a repeated query reuses a computed count. Empty for an empty filter.
+    /// Placeholders are generated in a fixed order, so equal clause text with equal ordered values yields the
+    /// same key; a different column, operator, or value yields a different one. Each part is length-prefixed
+    /// (<c>len:text</c>), so no clause or value content can ever be confused for the structure.</summary>
+    public string CacheKey => IsEmpty
+        ? ""
+        : $"{WhereClause.Length}:{WhereClause}|{string.Join("|", Parameters.Select(parameter => $"{parameter.Value.Length}:{parameter.Value}"))}";
+
     public SqlFilter(string whereClause, IReadOnlyList<QueryParameter> parameters)
     {
         WhereClause = whereClause;
