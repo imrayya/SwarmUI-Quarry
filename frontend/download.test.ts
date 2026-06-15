@@ -21,7 +21,9 @@ describe("renderRemoteDatasetRow", () => {
         );
         expect(html).toContain(">Download<");
         expect(html).toContain('data-redownload="false"');
-        expect(html).toContain("9.8 MB · 4 files");
+        expect(html).toContain("9.8 MB");
+        // The file count is intentionally not shown.
+        expect(html).not.toContain("file");
         expect(html).not.toContain("quarry-remote-installed");
         expect(html).not.toContain("quarry-remote-check");
     });
@@ -38,9 +40,7 @@ describe("renderRemoteDatasetRow", () => {
         expect(html).toContain("quarry-remote-check");
         expect(html).toContain(">Redownload<");
         expect(html).toContain('data-redownload="true"');
-        // Singular "file" for a one-file dataset.
-        expect(html).toContain("22.2 KB · 1 file");
-        expect(html).not.toContain("1 files");
+        expect(html).toContain("22.2 KB");
     });
 
     it("escapes the dataset name", () => {

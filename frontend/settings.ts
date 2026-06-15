@@ -15,14 +15,6 @@ const PREVIEW_MODAL_ID = "quarry-preview-modal";
 const PREVIEW_TITLE_ID = "quarry-preview-title";
 const PREVIEW_BODY_ID = "quarry-preview-body";
 
-// Re-exported from ./util so existing imports (and the settings tests) keep working unchanged.
-export { escapeHtml };
-
-export const renderStatus = (active: boolean, count: number): string =>
-    active
-        ? `<span class="quarry-status-active">✓ Active — ${count} dataset(s)</span>`
-        : `<span class="quarry-status-inactive">○ Inactive — enable and set a folder to activate</span>`;
-
 export const renderDatasetOptions = (dataset: DatasetDto): string =>
     dataset.columns
         .map((col) => {
@@ -81,7 +73,7 @@ export const renderDatasetRow = (dataset: DatasetDto): string => {
         <td><select class="quarry-dataset-column" data-dataset="${name}">${renderDatasetOptions(dataset)}</select></td>
         <td class="quarry-dataset-tags" title="Columns the 'tags' keyword searches across">${renderTagCheckboxes(dataset)}</td>
         <td class="quarry-dataset-rows" data-dataset="${name}" title="Rows in the dataset (loads when you preview it if not already counted)">${formatRowCount(dataset.rowCount)}</td>
-        <td><button type="button" class="basic-button quarry-preview-button" data-dataset="${name}" title="Preview the first ${PREVIEW_ROW_LIMIT} rows">👁 Preview</button></td>
+        <td><button type="button" class="basic-button quarry-preview-button" data-dataset="${name}" title="Preview the first ${PREVIEW_ROW_LIMIT} rows">Preview</button></td>
     </tr>`;
 };
 
@@ -125,7 +117,7 @@ export const renderPreviewTable = (
     </table>`;
 };
 
-export const renderForm = (enabled: boolean, folder: string): string => `
+export const renderForm = (folder: string): string => `
     <div class="quarry-settings">
         <form id="quarry-form">
             <div class="input-group input-group-open">
@@ -133,23 +125,15 @@ export const renderForm = (enabled: boolean, folder: string): string => `
                     <span class="header-label-wrap"><span class="header-label">🦆 Quarry</span></span>
                 </span>
                 <div class="input-group-content">
-                    <div class="auto-input auto-input-flex">
-                        <span class="auto-input-name">Enable</span>
-                        <label class="auto-checkbox">
-                            <input type="checkbox" id="quarry-enabled" ${enabled ? "checked" : ""}>
-                            <span class="auto-checkbox-label">Enable</span>
-                        </label>
+                    <div class="quarry-actions">
+                        <button type="button" id="quarry-refresh" class="basic-button">Refresh</button>
+                        <button type="button" id="quarry-download-datasets" class="basic-button" title="Browse and download ready-made datasets from the official collection">Download Datasets</button>
                     </div>
+                    <div id="quarry-datasets" class="quarry-datasets"></div>
                     <div class="auto-input auto-input-flex">
                         <label for="quarry-folder"><span class="auto-input-name">Datasets folder</span></label>
                         <input class="auto-text" type="text" id="quarry-folder" value="${escapeHtml(folder)}" placeholder="/path/to/datasets" autocomplete="off">
                     </div>
-                    <div id="quarry-status" class="quarry-status-line"></div>
-                    <div class="quarry-actions">
-                        <button type="button" id="quarry-refresh" class="basic-button">🔄 Refresh</button>
-                        <button type="button" id="quarry-download-datasets" class="basic-button" title="Browse and download ready-made datasets from the official collection">⬇ Download Datasets</button>
-                    </div>
-                    <div id="quarry-datasets" class="quarry-datasets"></div>
                 </div>
             </div>
             <div id="quarry-message" class="quarry-message"></div>
@@ -228,24 +212,11 @@ const applyTableHighlights = (names: string[]): void => {
 };
 
 const applyResponse = (data: SettingsResponse): void => {
-    const enabledEl = document.getElementById(
-        "quarry-enabled",
-    ) as HTMLInputElement | null;
     const folderEl = document.getElementById(
         "quarry-folder",
     ) as HTMLInputElement | null;
-    if (enabledEl) {
-        enabledEl.checked = data.enabled ?? false;
-    }
     if (folderEl) {
         folderEl.value = data.datasetsFolder ?? "";
-    }
-    const statusEl = document.getElementById("quarry-status");
-    if (statusEl) {
-        statusEl.innerHTML = renderStatus(
-            data.active ?? false,
-            data.count ?? 0,
-        );
     }
     const datasetsEl = document.getElementById("quarry-datasets");
     if (datasetsEl) {
@@ -288,9 +259,6 @@ const loadSettings = (): void => {
 };
 
 const saveSettings = (): void => {
-    const enabled = (
-        document.getElementById("quarry-enabled") as HTMLInputElement
-    ).checked;
     const folder = (
         document.getElementById("quarry-folder") as HTMLInputElement
     ).value.trim();
@@ -300,7 +268,6 @@ const saveSettings = (): void => {
     genericRequest<SettingsResponse>(
         "QuarrySaveSettings",
         {
-            enabled,
             datasetsFolder: folder,
             promptColumnsJson: JSON.stringify(promptColumns),
             tagColumnsJson: JSON.stringify(tagColumns),
@@ -465,7 +432,7 @@ const ensureFormRendered = (): void => {
     if (!host) {
         return;
     }
-    host.innerHTML = renderForm(false, "");
+    host.innerHTML = renderForm("");
     document
         .getElementById("quarry-form")
         ?.addEventListener("submit", (event) => {

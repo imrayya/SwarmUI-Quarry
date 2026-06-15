@@ -24,3 +24,7 @@ coverage/
 # Python
 .venv/
 __pycache__/
+
+# All regenerable extension caches, kept here so they survive restarts: the dataset schema/row-count/preview
+# cache (datasets.json) and the ~235 MB DuckDB lance extension binary (duckdb/). Safe to delete; rebuilt on demand.
+.cache/

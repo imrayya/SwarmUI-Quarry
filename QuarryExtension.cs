@@ -22,6 +22,9 @@ public class QuarryExtension : Extension
 
     public override void OnInit()
     {
+        // Remember our own folder so the DuckDB backend can cache the lance extension inside it (see
+        // DatasetManager.ExtensionFolder). Set before anything that might open a DuckDB connection.
+        DatasetManager.ExtensionFolder = FilePath;
         LoadSettings();
         ApplyDefaultDatasetsFolder();
         DatasetManager.Initialize();
@@ -85,7 +88,6 @@ public class QuarryExtension : Extension
                 return;
             }
             JObject settings = JObject.Parse(File.ReadAllText(SettingsFilePath));
-            DatasetManager.Enabled = settings.Value<bool?>("enabled") ?? false;
             DatasetManager.DatasetsFolder = settings.Value<string>("datasetsFolder") ?? "";
             DatasetManager.SetPromptColumns(ReadPromptColumns(settings["promptColumns"] as JObject));
             DatasetManager.SetTagColumns(ReadTagColumns(settings["tagColumns"] as JObject));
@@ -112,7 +114,6 @@ public class QuarryExtension : Extension
             }
             JObject settings = new()
             {
-                ["enabled"] = DatasetManager.Enabled,
                 ["datasetsFolder"] = DatasetManager.DatasetsFolder,
                 ["promptColumns"] = promptColumns,
                 ["tagColumns"] = tagColumns,
@@ -190,7 +191,6 @@ public class QuarryExtension : Extension
         return new JObject
         {
             ["success"] = true,
-            ["enabled"] = DatasetManager.Enabled,
             ["datasetsFolder"] = DatasetManager.DatasetsFolder,
             ["active"] = DatasetManager.IsActive,
             ["requirementsInstalled"] = requirementsInstalled,
@@ -204,11 +204,10 @@ public class QuarryExtension : Extension
         return Task.FromResult(BuildSettingsResponse());
     }
 
-    public Task<JObject> QuarrySaveSettings(Session session, bool enabled, string datasetsFolder, string promptColumnsJson, string tagColumnsJson)
+    public Task<JObject> QuarrySaveSettings(Session session, string datasetsFolder, string promptColumnsJson, string tagColumnsJson)
     {
         try
         {
-            DatasetManager.Enabled = enabled;
             DatasetManager.DatasetsFolder = datasetsFolder ?? "";
             JObject parsed = string.IsNullOrWhiteSpace(promptColumnsJson) ? [] : JObject.Parse(promptColumnsJson);
             DatasetManager.SetPromptColumns(ReadPromptColumns(parsed));
@@ -382,7 +381,7 @@ public class QuarryExtension : Extension
     public Task<JObject> QuarryDownloadStatus(Session session)
     {
         DatasetDownloader.DownloadStatus status = DatasetDownloader.GetStatus();
-        return Task.FromResult(new JObject
+        JObject response = new()
         {
             ["success"] = true,
             ["active"] = status.Active,
@@ -394,8 +393,14 @@ public class QuarryExtension : Extension
             ["filesDone"] = status.FilesDone,
             ["filesTotal"] = status.FilesTotal,
             ["perSecond"] = status.PerSecond,
-            ["error"] = status.Error,
-        });
+        };
+        // Only include "error" when there actually is one — the WebAPI layer logs an error for any response
+        // that merely *contains* an "error" key (even a null one), which would spam the log on every poll.
+        if (!string.IsNullOrEmpty(status.Error))
+        {
+            response["error"] = status.Error;
+        }
+        return Task.FromResult(response);
     }
 
     /// <summary>Cancels the in-flight dataset download, if any.</summary>

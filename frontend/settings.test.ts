@@ -3,30 +3,17 @@ import {
     applyInPromptHighlights,
     collectPromptColumns,
     collectTagColumns,
-    escapeHtml,
     formatRowCount,
     PREVIEW_ROW_LIMIT,
     renderDatasetRow,
     renderDatasets,
     renderPreviewTable,
-    renderStatus,
 } from "./settings";
+import { escapeHtml } from "./util";
 
 describe("escapeHtml", () => {
     it("escapes angle brackets and ampersands", () => {
         expect(escapeHtml("<script>&")).toBe("&lt;script&gt;&amp;");
-    });
-});
-
-describe("renderStatus", () => {
-    it("active shows the count", () => {
-        const html = renderStatus(true, 3);
-        expect(html).toContain("Active");
-        expect(html).toContain("3");
-    });
-
-    it("inactive shows a hint", () => {
-        expect(renderStatus(false, 0)).toContain("Inactive");
     });
 });
 

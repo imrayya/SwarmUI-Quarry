@@ -19,7 +19,6 @@ export interface DatasetDto {
 
 export interface SettingsResponse {
     success: boolean;
-    enabled?: boolean;
     datasetsFolder?: string;
     active?: boolean;
     // False when Quarry's runtime requirement (the DuckDB lance extension) isn't installed yet; the UI then

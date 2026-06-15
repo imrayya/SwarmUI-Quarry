@@ -1,4 +1,6 @@
+using System.IO;
 using DuckDB.NET.Data;
+using SwarmUI.Utils;
 
 namespace Quarry;
 
@@ -27,7 +29,36 @@ public sealed class DuckDbQueryBackend : IWildcardQueryBackend, IDisposable
             _connection.Open();
             // Keep row order deterministic so LIMIT/OFFSET selection is reproducible for a given dataset.
             Execute("SET preserve_insertion_order = true;");
+            // Pin the extension store to a stable, persistent location so the one-time lance install survives
+            // restarts. Must run before any INSTALL/LOAD/probe so they all agree on where extensions live. See
+            // ResolveExtensionDirectory for why the default (~/.duckdb) isn't reliable in container deployments.
+            string extensionDirectory = ResolveExtensionDirectory();
+            if (extensionDirectory is not null)
+            {
+                Execute($"SET extension_directory = '{extensionDirectory.Replace("'", "''")}';");
+            }
             _lanceLoaded = false;
+        }
+
+        /// <summary>Where DuckDB caches its downloaded extensions (the ~235 MB lance binary): the <c>duckdb</c>
+        /// subdir of this extension's git-ignored <c>.cache</c> folder (see <c>DatasetManager.CacheFolder</c>).
+        /// Without pinning it, DuckDB uses <c>~/.duckdb</c> — which in container/service deployments lives on an
+        /// ephemeral layer wiped on every reboot, so lance "disappears" and the install gate reappears each
+        /// boot. The cache folder persists across restarts, so installing here makes lance survive them. Returns
+        /// null (DuckDB stays on its default) only when the directory can't be created.</summary>
+        private static string ResolveExtensionDirectory()
+        {
+            try
+            {
+                string dir = Path.Combine(DatasetManager.CacheFolder, "duckdb");
+                Directory.CreateDirectory(dir);
+                return dir;
+            }
+            catch (Exception ex)
+            {
+                Logs.Warning($"Quarry: could not create the DuckDB extension cache under the extension's .cache folder; falling back to DuckDB's default (~/.duckdb), which may not survive restarts: {ex.Message}");
+                return null;
+            }
         }
 
         /// <summary>Disposes and rebuilds the connection, dropping all cached dataset metadata (notably stale

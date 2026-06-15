@@ -120,11 +120,10 @@
     const installed = dataset.installed;
     const rowClass = installed ? "quarry-remote-row quarry-remote-installed" : "quarry-remote-row";
     const check = installed ? `<span class="quarry-remote-check" title="Installed">✓</span> ` : "";
-    const files = `${dataset.fileCount} file${dataset.fileCount === 1 ? "" : "s"}`;
     const label = installed ? "Redownload" : "Download";
     return `<tr class="${rowClass}" data-dataset="${name}">
         <td class="quarry-remote-name">${check}${name}</td>
-        <td class="quarry-remote-size">${formatBytes(dataset.sizeBytes)} · ${files}</td>
+        <td class="quarry-remote-size">${formatBytes(dataset.sizeBytes)}</td>
         <td class="quarry-remote-action">
             <button type="button" class="basic-button quarry-remote-download" data-dataset="${name}" data-redownload="${installed}">${label}</button>
         </td>
@@ -407,7 +406,7 @@
         <div class="modal-dialog modal-lg quarry-download-dialog" role="document">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title">⬇ Download Datasets</h5>
+                    <h5 class="modal-title">Download Datasets</h5>
                 </div>
                 <div class="modal-body">
                     <div id="${BODY_ID}" class="quarry-download-body"></div>
@@ -500,7 +499,6 @@
   var PREVIEW_MODAL_ID = "quarry-preview-modal";
   var PREVIEW_TITLE_ID = "quarry-preview-title";
   var PREVIEW_BODY_ID = "quarry-preview-body";
-  var renderStatus = (active, count) => active ? `<span class="quarry-status-active">✓ Active — ${count} dataset(s)</span>` : `<span class="quarry-status-inactive">○ Inactive — enable and set a folder to activate</span>`;
   var renderDatasetOptions = (dataset) => dataset.columns.map((col) => {
     const selected = col.name === dataset.resolvedPromptColumn ? " selected" : "";
     const badge = col.kind === "list" ? " [list]" : "";
@@ -535,7 +533,7 @@
         <td><select class="quarry-dataset-column" data-dataset="${name}">${renderDatasetOptions(dataset)}</select></td>
         <td class="quarry-dataset-tags" title="Columns the 'tags' keyword searches across">${renderTagCheckboxes(dataset)}</td>
         <td class="quarry-dataset-rows" data-dataset="${name}" title="Rows in the dataset (loads when you preview it if not already counted)">${formatRowCount(dataset.rowCount)}</td>
-        <td><button type="button" class="basic-button quarry-preview-button" data-dataset="${name}" title="Preview the first ${PREVIEW_ROW_LIMIT} rows">👁 Preview</button></td>
+        <td><button type="button" class="basic-button quarry-preview-button" data-dataset="${name}" title="Preview the first ${PREVIEW_ROW_LIMIT} rows">Preview</button></td>
     </tr>`;
   };
   var renderDatasets = (datasets) => {
@@ -569,7 +567,7 @@
         <tbody>${body}</tbody>
     </table>`;
   };
-  var renderForm = (enabled, folder) => `
+  var renderForm = (folder) => `
     <div class="quarry-settings">
         <form id="quarry-form">
             <div class="input-group input-group-open">
@@ -577,23 +575,15 @@
                     <span class="header-label-wrap"><span class="header-label">🦆 Quarry</span></span>
                 </span>
                 <div class="input-group-content">
-                    <div class="auto-input auto-input-flex">
-                        <span class="auto-input-name">Enable</span>
-                        <label class="auto-checkbox">
-                            <input type="checkbox" id="quarry-enabled" ${enabled ? "checked" : ""}>
-                            <span class="auto-checkbox-label">Enable</span>
-                        </label>
+                    <div class="quarry-actions">
+                        <button type="button" id="quarry-refresh" class="basic-button">Refresh</button>
+                        <button type="button" id="quarry-download-datasets" class="basic-button" title="Browse and download ready-made datasets from the official collection">Download Datasets</button>
                     </div>
+                    <div id="quarry-datasets" class="quarry-datasets"></div>
                     <div class="auto-input auto-input-flex">
                         <label for="quarry-folder"><span class="auto-input-name">Datasets folder</span></label>
                         <input class="auto-text" type="text" id="quarry-folder" value="${escapeHtml(folder)}" placeholder="/path/to/datasets" autocomplete="off">
                     </div>
-                    <div id="quarry-status" class="quarry-status-line"></div>
-                    <div class="quarry-actions">
-                        <button type="button" id="quarry-refresh" class="basic-button">🔄 Refresh</button>
-                        <button type="button" id="quarry-download-datasets" class="basic-button" title="Browse and download ready-made datasets from the official collection">⬇ Download Datasets</button>
-                    </div>
-                    <div id="quarry-datasets" class="quarry-datasets"></div>
                 </div>
             </div>
             <div id="quarry-message" class="quarry-message"></div>
@@ -657,24 +647,11 @@
     }
   };
   var applyResponse = (data) => {
-    const enabledEl = document.getElementById(
-      "quarry-enabled"
-    );
     const folderEl = document.getElementById(
       "quarry-folder"
     );
-    if (enabledEl) {
-      enabledEl.checked = data.enabled ?? false;
-    }
     if (folderEl) {
       folderEl.value = data.datasetsFolder ?? "";
-    }
-    const statusEl = document.getElementById("quarry-status");
-    if (statusEl) {
-      statusEl.innerHTML = renderStatus(
-        data.active ?? false,
-        data.count ?? 0
-      );
     }
     const datasetsEl = document.getElementById("quarry-datasets");
     if (datasetsEl) {
@@ -712,7 +689,6 @@
     });
   };
   var saveSettings = () => {
-    const enabled = document.getElementById("quarry-enabled").checked;
     const folder = document.getElementById("quarry-folder").value.trim();
     const container = document.getElementById("quarry-datasets");
     const promptColumns = container ? collectPromptColumns(container) : {};
@@ -720,7 +696,6 @@
     genericRequest(
       "QuarrySaveSettings",
       {
-        enabled,
         datasetsFolder: folder,
         promptColumnsJson: JSON.stringify(promptColumns),
         tagColumnsJson: JSON.stringify(tagColumns)
@@ -863,7 +838,7 @@
     if (!host) {
       return;
     }
-    host.innerHTML = renderForm(false, "");
+    host.innerHTML = renderForm("");
     document.getElementById("quarry-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
       saveSettings();

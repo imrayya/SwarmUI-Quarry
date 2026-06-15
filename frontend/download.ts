@@ -30,11 +30,10 @@ export const renderRemoteDatasetRow = (dataset: RemoteDatasetDto): string => {
     const check = installed
         ? `<span class="quarry-remote-check" title="Installed">✓</span> `
         : "";
-    const files = `${dataset.fileCount} file${dataset.fileCount === 1 ? "" : "s"}`;
     const label = installed ? "Redownload" : "Download";
     return `<tr class="${rowClass}" data-dataset="${name}">
         <td class="quarry-remote-name">${check}${name}</td>
-        <td class="quarry-remote-size">${formatBytes(dataset.sizeBytes)} · ${files}</td>
+        <td class="quarry-remote-size">${formatBytes(dataset.sizeBytes)}</td>
         <td class="quarry-remote-action">
             <button type="button" class="basic-button quarry-remote-download" data-dataset="${name}" data-redownload="${installed}">${label}</button>
         </td>
@@ -376,7 +375,7 @@ const ensureDownloadModal = (): void => {
         <div class="modal-dialog modal-lg quarry-download-dialog" role="document">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title">⬇ Download Datasets</h5>
+                    <h5 class="modal-title">Download Datasets</h5>
                 </div>
                 <div class="modal-body">
                     <div id="${BODY_ID}" class="quarry-download-body"></div>

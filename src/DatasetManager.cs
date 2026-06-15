@@ -13,19 +13,40 @@ public sealed record DatasetEntry(string WildcardName, string Path, string FileH
 
 /// <summary>Orchestrates the datasets folder: scans it, tracks a name → dataset map, caches per-dataset
 /// schema, and owns the shared <see cref="DuckDbQueryBackend"/>. Quarry serves its own <c>&lt;q:&gt;</c> tag
-/// and is fully detached from SwarmUI's Wildcards folder — it writes nothing there (see
-/// <see cref="CleanupLegacyPlaceholders"/> for one-time removal of files an older version mirrored).</summary>
+/// and is fully detached from SwarmUI's Wildcards folder — it writes nothing there.</summary>
 public static class DatasetManager
 {
-    /// <summary>Exact body of the placeholder <c>.txt</c> files older versions wrote into the Wildcards folder.
-    /// Used only to recognize and delete them on startup — see <see cref="CleanupLegacyPlaceholders"/>.</summary>
-    private const string PlaceholderContent = "# Quarry placeholder - do not edit\n";
-
-    public static bool Enabled { get; set; }
-
     public static string DatasetsFolder { get; set; } = "";
 
-    public static bool IsActive => Enabled && !string.IsNullOrWhiteSpace(DatasetsFolder);
+    /// <summary>This extension's own folder (SwarmUI's <c>Extension.FilePath</c>), set during OnInit. All of the
+    /// extension's regenerable cache data lives under <see cref="CacheFolder"/> inside it. Empty until OnInit runs.</summary>
+    public static string ExtensionFolder { get; set; } = "";
+
+    /// <summary>Root for all of this extension's regenerable cache data: a git-ignored <c>.cache</c> folder
+    /// inside <see cref="ExtensionFolder"/>, holding the DuckDB extension binary (under <c>duckdb/</c>) and the
+    /// dataset schema / row-count / preview cache (<c>datasets.json</c>). Kept inside the extension so all
+    /// derived state lives together, survives restarts, and can be wiped wholesale to force a clean rebuild.
+    /// Falls back to the SwarmUI data dir (then the current dir) if the extension folder isn't known yet.</summary>
+    public static string CacheFolder
+    {
+        get
+        {
+            string root = ExtensionFolder;
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                root = Program.DataDir;
+            }
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                root = ".";
+            }
+            return Path.GetFullPath(Path.Combine(root, ".cache"));
+        }
+    }
+
+    // The extension is active whenever a datasets folder is set (one is created by default on init), so there
+    // is no separate enable toggle — installing the extension is enough.
+    public static bool IsActive => !string.IsNullOrWhiteSpace(DatasetsFolder);
 
     // key = wildcard name lowercased
     private static readonly ConcurrentDictionary<string, DatasetEntry> Datasets = new();
@@ -34,9 +55,8 @@ public static class DatasetManager
     private static readonly ConcurrentDictionary<string, CacheEntry> Cache = new();
     private static readonly object CacheLock = new();
     private static volatile bool _cacheDirty;
-    // v2: a cached row count is now the dataset's raw total (blank-prompt rows are filtered at ingest), not a
-    // live non-empty scan — so discard counts persisted by older versions, which meant something different.
-    private const int CacheVersion = 2;
+    // Bumped on any incompatible change to the on-disk cache format; a mismatch discards the file and rebuilds.
+    private const int CacheVersion = 1;
     /// <summary>Number of preview rows the UI requests and that warming pre-caches. Keep in sync with the
     /// preview limit the API/frontend use, so a warmed preview is a cache hit for the real request.</summary>
     public const int DefaultPreviewLimit = 100;
@@ -79,9 +99,6 @@ public static class DatasetManager
         // Seed the in-memory cache from the persisted file before the first Sync, so unchanged files reuse
         // their stored schema / row count / preview instead of recomputing them this session.
         LoadCache();
-        // One-time housekeeping: an earlier Quarry mirrored every dataset to a placeholder .txt in the
-        // Wildcards folder. We no longer do that, so remove any that are still lying around.
-        CleanupLegacyPlaceholders();
         if (IsActive)
         {
             Sync();
@@ -184,7 +201,7 @@ public static class DatasetManager
     public static IReadOnlyCollection<DatasetEntry> AllDatasets => [.. Datasets.Values];
 
     /// <summary>A snapshot of every known dataset's <c>&lt;q:&gt;</c> name — the list a plain reference is fuzzy
-    /// matched against (replacing the Wildcards folder we used to lean on).</summary>
+    /// matched against.</summary>
     public static IReadOnlyList<string> AllDatasetNames => [.. Datasets.Values.Select(e => e.WildcardName)];
 
     /// <summary>Returns the dataset's schema, cached (in memory and on disk) until the underlying file changes.</summary>
@@ -411,7 +428,7 @@ public static class DatasetManager
 
     /// <summary>Scans the datasets folder and rebuilds the name → dataset map. Drops datasets no longer present,
     /// invalidates changed schemas/row counts, and resets the DuckDB connection when anything changed. Writes
-    /// nothing to disk — Quarry no longer mirrors datasets into the Wildcards folder.</summary>
+    /// nothing to disk.</summary>
     public static void Sync()
     {
         if (!IsActive)
@@ -484,49 +501,6 @@ public static class DatasetManager
         }
     }
 
-    /// <summary>Removes the placeholder <c>.txt</c> files an older Quarry mirrored into the Wildcards folder.
-    /// Deletes only files whose contents are byte-for-byte our <see cref="PlaceholderContent"/> sentinel, so a
-    /// real wildcard a user wrote is never touched. Best-effort and idempotent: once the files are gone, later
-    /// runs find nothing to do.</summary>
-    private static void CleanupLegacyPlaceholders()
-    {
-        try
-        {
-            string wildcardDir = WildcardsHelper.Folder;
-            if (!Directory.Exists(wildcardDir))
-            {
-                return;
-            }
-            long sentinelLength = Encoding.UTF8.GetByteCount(PlaceholderContent);
-            int removed = 0;
-            foreach (string file in Directory.EnumerateFiles(wildcardDir, "*.txt", SearchOption.AllDirectories))
-            {
-                try
-                {
-                    // Cheap guard: skip anything that isn't the exact size of our sentinel before reading it.
-                    if (new FileInfo(file).Length != sentinelLength || File.ReadAllText(file) != PlaceholderContent)
-                    {
-                        continue;
-                    }
-                    File.Delete(file);
-                    removed++;
-                }
-                catch
-                {
-                    // A single unreadable/locked file must not abort the sweep.
-                }
-            }
-            if (removed > 0)
-            {
-                Logs.Info($"Quarry: removed {removed} legacy placeholder wildcard file(s) from '{wildcardDir}'.");
-            }
-        }
-        catch (Exception ex)
-        {
-            Logs.Warning($"Quarry: failed to clean up legacy placeholders: {ex.Message}");
-        }
-    }
-
     public static (bool Success, int Count, string Message, string Error) Refresh()
     {
         if (!IsActive)
@@ -579,9 +553,9 @@ public static class DatasetManager
     /// cells), exactly as the preview UI shows them.</summary>
     private sealed record PreviewData(int Limit, List<string> Columns, List<List<string>> Rows);
 
-    /// <summary>The cache file path, next to the settings file under the SwarmUI data dir (outside this
-    /// extension's git repo, so it is never committed). Holds only derived data — safe to delete anytime.</summary>
-    private static string CacheFilePath => $"{Program.DataDir}/Quarry.Cache.json";
+    /// <summary>The dataset cache file, inside the extension's git-ignored <see cref="CacheFolder"/>. Holds only
+    /// derived data (schema, row counts, previews) — safe to delete anytime; it is rebuilt on demand.</summary>
+    private static string CacheFilePath => Path.Combine(CacheFolder, "datasets.json");
 
     private static void StoreSchema(string key, string hash, ColumnSchema schema)
     {
