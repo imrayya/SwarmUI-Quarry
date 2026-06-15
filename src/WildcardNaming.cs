@@ -1,10 +1,10 @@
 namespace Quarry;
 
-/// <summary>Maps a dataset file's path (relative to the datasets folder) to its wildcard name and to the
-/// placeholder <c>.txt</c> path that mirrors it into the Wildcards folder. Pure and side-effect free.</summary>
+/// <summary>Maps a dataset file's path (relative to the datasets folder) to its <c>&lt;q:&gt;</c> name. Pure
+/// and side-effect free.</summary>
 public static class WildcardNaming
 {
-    /// <summary>Normalizes a relative path to a wildcard name: forward slashes, no leading slash, and the
+    /// <summary>Normalizes a relative path to a dataset name: forward slashes, no leading slash, and the
     /// final segment's extension stripped. e.g. <c>prompts\1girl.parquet</c> → <c>prompts/1girl</c>,
     /// <c>styles.v2/list.jsonl</c> → <c>styles.v2/list</c>.</summary>
     public static string ToWildcardName(string relativePath)
@@ -19,7 +19,4 @@ public static class WildcardNaming
         }
         return normalized;
     }
-
-    /// <summary>The placeholder file's relative path within the Wildcards folder (wildcard name + ".txt").</summary>
-    public static string ToPlaceholderRelativePath(string wildcardName) => wildcardName + ".txt";
 }

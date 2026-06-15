@@ -47,11 +47,11 @@ hf download jtreminio/prompt-dataset --repo-type dataset \
 
 ## How to use it
 
-Drop a supported data file into your datasets folder (see [Setup](#setup)), then use it anywhere in a prompt. (`wc` is SwarmUI's shorthand for `wildcard`.)
+Drop a supported data file into your datasets folder (see [Setup](#setup)), then reference it anywhere in a prompt with Quarry's own `<q:...>` tag. (Browse and click datasets from the **Quarry** tab in the bottom bar — see [Setup](#setup).)
 
 ```
-<wc:NAME>                a random entry
-<wc:NAME[ FILTER ]>      a random entry that matches your filter
+<q:NAME>                a random entry
+<q:NAME[ FILTER ]>      a random entry that matches your filter
 ```
 
 A filter is `column operator value`. List several values with commas — the operator decides how they match:
@@ -67,36 +67,36 @@ Easy way to remember: **`=` one, `==` all, `!=` none.**
 Stack filters with `;` to require all of them at once:
 
 ```
-<wc:prompts[tags=punk,goth ; source=civitai]>
+<q:prompts[tags=punk,goth ; source=civitai]>
 ```
 
 ### Examples
 
 | Tag | What you get |
 | --- | --- |
-| `<wc:prompts>` | any random prompt |
-| `<wc:prompts[tags=brunette,punk]>` | tagged brunette **or** punk |
-| `<wc:prompts[tags==brunette,punk]>` | tagged brunette **and** punk |
-| `<wc:prompts[tags!=nsfw]>` | **not** tagged nsfw |
-| `<wc:midjourney[prompt=girl]>` | prompts containing "girl" |
-| `<wc:prompts[tags=brunette,punk ; source=civitai]>` | (brunette or punk) **and** from civitai |
-| `<wc[3]:prompts[tags=punk]>` | 3 different punk prompts |
+| `<q:prompts>` | any random prompt |
+| `<q:prompts[tags=brunette,punk]>` | tagged brunette **or** punk |
+| `<q:prompts[tags==brunette,punk]>` | tagged brunette **and** punk |
+| `<q:prompts[tags!=nsfw]>` | **not** tagged nsfw |
+| `<q:midjourney[prompt=girl]>` | prompts containing "girl" |
+| `<q:prompts[tags=brunette,punk ; source=civitai]>` | (brunette or punk) **and** from civitai |
+| `<q[3]:prompts[tags=punk]>` | 3 different punk prompts |
 
 ### Good to know
 
 - **Matching is "contains," not exact.** `prompt=girl` finds every entry whose prompt *contains* "girl" — exact matching would defeat the point of a wildcard. Capitalization is ignored.
 - Columns that hold a **list of tags** are matched tag-by-tag, but each tag is still "contains" — so `tags=girl` matches the tags `girls` and `young girl` (and, yes, `tags=punk` also matches `cyberpunk`). Plain text columns are matched by "contains" too.
 - Values can include spaces (`long hair`), but these characters are reserved and can't appear inside a value: `; , = ! [ ] < >`
-- Need several picks at once? SwarmUI's built-in count works: `<wc[3]:prompts>` gives 3 different entries.
+- Need several picks at once? SwarmUI's built-in count works: `<q[3]:prompts>` gives 3 different entries.
 
 ## Setup
 
 1. Open the **Quarry** panel in SwarmUI's **Tools / Utilities** area.
 2. Tick **Enable**, set the **Datasets folder** to a folder containing your data files, and click **Save**.
 3. Each dataset shows a **prompt column** dropdown — pick the column that holds the prompt text (Quarry guesses sensibly, e.g. a column named `prompt`, `text`, or `caption`). Click **Save** again.
-4. Use it in any prompt: `<wc:prompts[tags=punk]>`.
+4. Use it in any prompt: `<q:prompts[tags=punk]>`.
 
-Your datasets also appear in SwarmUI's normal wildcard autocomplete, so typing `<wc:` suggests them just like built-in wildcards. Click **Refresh** whenever you add or change files.
+Your datasets get their own **Quarry** tab in the bottom bar (next to Wildcards): browse them by folder and click one to drop a `<q:NAME>` reference into your prompt. Datasets referenced by the current prompt are highlighted there. Click **Refresh** (in the panel or the tab) whenever you add or change files.
 
 ## Development
 

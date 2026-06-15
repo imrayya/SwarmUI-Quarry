@@ -16,10 +16,4 @@ public class WildcardNamingTests
     {
         Assert.Equal(expected, WildcardNaming.ToWildcardName(relative));
     }
-
-    [Fact]
-    public void ToPlaceholderRelativePath_AppendsTxt()
-    {
-        Assert.Equal("prompts/1girl.txt", WildcardNaming.ToPlaceholderRelativePath("prompts/1girl"));
-    }
 }

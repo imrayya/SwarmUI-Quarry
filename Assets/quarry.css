@@ -60,7 +60,7 @@
     background: var(--background-gray);
 }
 
-/* Flagged when the dataset is referenced by a wc/wildcard tag in the current prompt. */
+/* Flagged when the dataset is referenced by a <q:...> tag in the current prompt. */
 .quarry-dataset-row.quarry-dataset-in-prompt {
     background: color-mix(in srgb, var(--green) 16%, transparent);
     box-shadow: inset 3px 0 0 var(--green);
@@ -166,4 +166,28 @@
 .quarry-preview-error {
     color: var(--red);
     padding: 0.5rem;
+}
+
+/* --- Quarry browser tab (cards) --- */
+
+.quarry-card-title {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.quarry-card-meta {
+    color: var(--text-soft);
+    font-size: 0.9em;
+}
+
+.quarry-card-cols {
+    color: var(--text-soft);
+    font-size: 0.85em;
+    overflow-wrap: anywhere;
+}
+
+.quarry-card-error {
+    color: var(--red);
+    font-size: 0.9em;
+    overflow-wrap: anywhere;
 }

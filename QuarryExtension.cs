@@ -21,6 +21,9 @@ public class QuarryExtension : Extension
     {
         LoadSettings();
         DatasetManager.Initialize();
+        // Register our own <q:...> prompt tag. It's exclusively ours (no piggybacking on wc/wildcard), so there's
+        // no init-order/chaining concern — a plain OnInit registration is enough.
+        WildcardHandler.Initialize();
 
         API.RegisterAPICall(QuarryGetSettings, false, Permissions.FundamentalGenerateTabAccess);
         API.RegisterAPICall(QuarrySaveSettings, true, Permissions.FundamentalGenerateTabAccess);
@@ -30,16 +33,6 @@ public class QuarryExtension : Extension
 
         string status = DatasetManager.IsActive ? $"enabled, folder: {DatasetManager.DatasetsFolder}" : "disabled";
         Logs.Info($"Quarry extension initialized ({status}).");
-    }
-
-    public override void OnPreLaunch()
-    {
-        // Register the wc/wildcard hook in OnPreLaunch (which runs AFTER every extension's OnInit) so we
-        // become the OUTERMOST handler. Other extensions that wrap wc/wildcard in OnInit
-        // resolve the name via GetBestInList on the raw data; our `name[query]` syntax fails that match, so
-        // if they ran outermost they would drop the tag instead of delegating to us. Being outermost, we
-        // claim our own datasets (brackets and all) and delegate everything else down the chain.
-        WildcardHandler.Initialize();
     }
 
     public override void OnShutdown()
@@ -179,7 +172,7 @@ public class QuarryExtension : Extension
             DatasetManager.SetPromptColumns(ReadPromptColumns(parsed));
             JObject parsedTags = string.IsNullOrWhiteSpace(tagColumnsJson) ? [] : JObject.Parse(tagColumnsJson);
             DatasetManager.SetTagColumns(ReadTagColumns(parsedTags));
-            DatasetManager.SyncPlaceholders();
+            DatasetManager.Sync();
             SaveSettings();
             return Task.FromResult(BuildSettingsResponse());
         }

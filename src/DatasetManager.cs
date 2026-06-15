@@ -5,15 +5,19 @@ using SwarmUI.Utils;
 
 namespace Quarry;
 
-/// <summary>A dataset the extension serves as a wildcard: its wildcard <see cref="WildcardName"/>, the
-/// absolute <see cref="Path"/> to the data file/dataset, and a cheap change <see cref="FileHash"/>.</summary>
+/// <summary>A dataset the extension serves as a <c>&lt;q:&gt;</c> reference: its <see cref="WildcardName"/>
+/// (the name used in <c>&lt;q:NAME&gt;</c>), the absolute <see cref="Path"/> to the data file/dataset, and a
+/// cheap change <see cref="FileHash"/>.</summary>
 public sealed record DatasetEntry(string WildcardName, string Path, string FileHash);
 
-/// <summary>Orchestrates the datasets folder: scans it, mirrors each dataset to a placeholder <c>.txt</c>
-/// in the Wildcards folder (never overwriting), tracks a name → dataset map, caches per-dataset schema,
-/// and owns the shared <see cref="DuckDbQueryBackend"/>. Mirrors WhatTheDuck's DatadumpManager pattern.</summary>
+/// <summary>Orchestrates the datasets folder: scans it, tracks a name → dataset map, caches per-dataset
+/// schema, and owns the shared <see cref="DuckDbQueryBackend"/>. Quarry serves its own <c>&lt;q:&gt;</c> tag
+/// and is fully detached from SwarmUI's Wildcards folder — it writes nothing there (see
+/// <see cref="CleanupLegacyPlaceholders"/> for one-time removal of files an older version mirrored).</summary>
 public static class DatasetManager
 {
+    /// <summary>Exact body of the placeholder <c>.txt</c> files older versions wrote into the Wildcards folder.
+    /// Used only to recognize and delete them on startup — see <see cref="CleanupLegacyPlaceholders"/>.</summary>
     private const string PlaceholderContent = "# Quarry placeholder - do not edit\n";
 
     public static bool Enabled { get; set; }
@@ -39,9 +43,12 @@ public static class DatasetManager
 
     public static void Initialize()
     {
+        // One-time housekeeping: an earlier Quarry mirrored every dataset to a placeholder .txt in the
+        // Wildcards folder. We no longer do that, so remove any that are still lying around.
+        CleanupLegacyPlaceholders();
         if (IsActive)
         {
-            SyncPlaceholders();
+            Sync();
         }
         Program.ModelRefreshEvent += OnModelRefresh;
     }
@@ -57,7 +64,7 @@ public static class DatasetManager
     {
         if (IsActive)
         {
-            SyncPlaceholders();
+            Sync();
         }
     }
 
@@ -138,6 +145,10 @@ public static class DatasetManager
 
     /// <summary>A snapshot of all currently known datasets, for fanning a glob/comma reference out over them.</summary>
     public static IReadOnlyCollection<DatasetEntry> AllDatasets => [.. Datasets.Values];
+
+    /// <summary>A snapshot of every known dataset's <c>&lt;q:&gt;</c> name — the list a plain reference is fuzzy
+    /// matched against (replacing the Wildcards folder we used to lean on).</summary>
+    public static IReadOnlyList<string> AllDatasetNames => [.. Datasets.Values.Select(e => e.WildcardName)];
 
     /// <summary>Returns the dataset's schema, cached until the underlying file changes.</summary>
     public static ColumnSchema GetSchema(DatasetEntry entry)
@@ -223,9 +234,10 @@ public static class DatasetManager
         }
     }
 
-    /// <summary>Scans the datasets folder and creates placeholder files in the Wildcards folder; never
-    /// overwrites existing files. Drops datasets no longer present and invalidates changed schemas.</summary>
-    public static void SyncPlaceholders()
+    /// <summary>Scans the datasets folder and rebuilds the name → dataset map. Drops datasets no longer present,
+    /// invalidates changed schemas/row counts, and resets the DuckDB connection when anything changed. Writes
+    /// nothing to disk — Quarry no longer mirrors datasets into the Wildcards folder.</summary>
+    public static void Sync()
     {
         if (!IsActive)
         {
@@ -237,15 +249,12 @@ public static class DatasetManager
         try
         {
             string root = DatasetsFolder;
-            string wildcardDir = WildcardsHelper.Folder;
             if (!Directory.Exists(root))
             {
                 Logs.Warning($"Quarry: datasets folder does not exist: '{root}'");
                 return;
             }
-            Directory.CreateDirectory(wildcardDir);
             HashSet<string> seen = [];
-            int created = 0;
             // Tracks whether any dataset was added, removed, or had its file change. If so we rebuild the
             // DuckDB connection below: a regenerated Lance dataset keeps the same path but gets new fragment
             // files, and the old connection's cached manifest would still point at the deleted ones.
@@ -257,7 +266,7 @@ public static class DatasetManager
                 string key = name.ToLowerFast();
                 if (!seen.Add(key))
                 {
-                    Logs.Warning($"Quarry: multiple files map to wildcard '{name}'; keeping the first, ignoring '{relative}'.");
+                    Logs.Warning($"Quarry: multiple files map to '{name}'; keeping the first, ignoring '{relative}'.");
                     continue;
                 }
                 string hash = ComputeHash(datasetPath);
@@ -274,19 +283,6 @@ public static class DatasetManager
                     contentChanged = true;
                 }
                 Datasets[key] = new DatasetEntry(name, datasetPath, hash);
-
-                string placeholderRelative = WildcardNaming.ToPlaceholderRelativePath(name).Replace('/', Path.DirectorySeparatorChar);
-                string placeholderPath = Path.Combine(wildcardDir, placeholderRelative);
-                string placeholderDir = Path.GetDirectoryName(placeholderPath);
-                if (!string.IsNullOrEmpty(placeholderDir))
-                {
-                    Directory.CreateDirectory(placeholderDir);
-                }
-                if (!File.Exists(placeholderPath))
-                {
-                    File.WriteAllText(placeholderPath, PlaceholderContent);
-                    created++;
-                }
             }
             foreach (string key in Datasets.Keys.Where(k => !seen.Contains(k)).ToList())
             {
@@ -302,11 +298,54 @@ public static class DatasetManager
             {
                 _backend?.Reset();
             }
-            Logs.Info($"Quarry: synced {Datasets.Count} dataset(s) ({created} placeholder(s) created).");
+            Logs.Info($"Quarry: synced {Datasets.Count} dataset(s).");
         }
         catch (Exception ex)
         {
-            Logs.Error($"Quarry: error syncing placeholders: {ex.ReadableString()}");
+            Logs.Error($"Quarry: error syncing datasets: {ex.ReadableString()}");
+        }
+    }
+
+    /// <summary>Removes the placeholder <c>.txt</c> files an older Quarry mirrored into the Wildcards folder.
+    /// Deletes only files whose contents are byte-for-byte our <see cref="PlaceholderContent"/> sentinel, so a
+    /// real wildcard a user wrote is never touched. Best-effort and idempotent: once the files are gone, later
+    /// runs find nothing to do.</summary>
+    private static void CleanupLegacyPlaceholders()
+    {
+        try
+        {
+            string wildcardDir = WildcardsHelper.Folder;
+            if (!Directory.Exists(wildcardDir))
+            {
+                return;
+            }
+            long sentinelLength = Encoding.UTF8.GetByteCount(PlaceholderContent);
+            int removed = 0;
+            foreach (string file in Directory.EnumerateFiles(wildcardDir, "*.txt", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    // Cheap guard: skip anything that isn't the exact size of our sentinel before reading it.
+                    if (new FileInfo(file).Length != sentinelLength || File.ReadAllText(file) != PlaceholderContent)
+                    {
+                        continue;
+                    }
+                    File.Delete(file);
+                    removed++;
+                }
+                catch
+                {
+                    // A single unreadable/locked file must not abort the sweep.
+                }
+            }
+            if (removed > 0)
+            {
+                Logs.Info($"Quarry: removed {removed} legacy placeholder wildcard file(s) from '{wildcardDir}'.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"Quarry: failed to clean up legacy placeholders: {ex.Message}");
         }
     }
 
@@ -318,7 +357,7 @@ public static class DatasetManager
         }
         try
         {
-            SyncPlaceholders();
+            Sync();
             return (true, Count, $"Synced {Count} dataset(s).", null);
         }
         catch (Exception ex)

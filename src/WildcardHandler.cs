@@ -5,29 +5,19 @@ using SwarmUI.Utils;
 
 namespace Quarry;
 
-/// <summary>Hooks SwarmUI's <c>wildcard</c>/<c>wc</c> prompt-tag processors: captures the currently
-/// registered delegate and replaces it with one that serves our datasets via DuckDB, falling back to
-/// the captured delegate for every other wildcard. This chains cleanly with core and with other
-/// extensions (e.g. WhatTheDuck) regardless of init order — we only claim names we own.</summary>
+/// <summary>Registers SwarmUI's <c>q</c> prompt-tag (<c>&lt;q:NAME[query]&gt;</c>) and serves it from our
+/// datasets via DuckDB. The <c>q</c> prefix is Quarry's own — it does not piggyback on, capture, or chain to
+/// core's <c>wc</c>/<c>wildcard</c> handlers. A <c>q</c> reference that doesn't match a dataset is dropped
+/// (with a warning when the extension is active) rather than delegated anywhere.</summary>
 public static class WildcardHandler
 {
-    private static Func<string, T2IPromptHandling.PromptTagContext, string> _originalProcessor;
-    private static Func<string, T2IPromptHandling.PromptTagContext, string> _originalEstimator;
+    /// <summary>The prompt-tag prefix this extension owns: <c>&lt;q:...&gt;</c>.</summary>
+    public const string TagPrefix = "q";
 
     public static void Initialize()
     {
-        if (T2IPromptHandling.PromptTagProcessors.TryGetValue("wildcard", out Func<string, T2IPromptHandling.PromptTagContext, string> processor))
-        {
-            _originalProcessor = processor;
-        }
-        if (T2IPromptHandling.PromptTagLengthEstimators.TryGetValue("wildcard", out Func<string, T2IPromptHandling.PromptTagContext, string> estimator))
-        {
-            _originalEstimator = estimator;
-        }
-        T2IPromptHandling.PromptTagProcessors["wildcard"] = Processor;
-        T2IPromptHandling.PromptTagProcessors["wc"] = Processor;
-        T2IPromptHandling.PromptTagLengthEstimators["wildcard"] = Estimator;
-        T2IPromptHandling.PromptTagLengthEstimators["wc"] = Estimator;
+        T2IPromptHandling.PromptTagProcessors[TagPrefix] = Processor;
+        T2IPromptHandling.PromptTagLengthEstimators[TagPrefix] = Estimator;
     }
 
     /// <summary>One file matched by a reference: where to read its prompt from, the WHERE filter built for
@@ -41,14 +31,24 @@ public static class WildcardHandler
         {
             query = WildcardQueryParser.Parse(data);
         }
-        catch (WildcardQueryException)
+        catch (WildcardQueryException ex)
         {
-            return Chain(data, context);
+            // A malformed <q:...> is a user error, not something to pass along — drop it (warn only when active
+            // so a disabled extension doesn't spam old prompts that still contain q-tags).
+            if (DatasetManager.IsActive)
+            {
+                context.TrackWarning($"Quarry: invalid reference '{data}': {ex.Message}");
+            }
+            return "";
         }
         List<DatasetEntry> targets = ResolveTargets(query.Name);
         if (targets.Count == 0)
         {
-            return Chain(data, context);
+            if (DatasetManager.IsActive)
+            {
+                context.TrackWarning($"Quarry: no dataset matches '{query.Name}'.");
+            }
+            return "";
         }
         bool multi = IsMultiReference(query.Name);
         try
@@ -57,25 +57,25 @@ public static class WildcardHandler
         }
         catch (WildcardQueryException ex)
         {
-            context.TrackWarning($"Quarry wildcard '{query.Name}': {ex.Message}");
+            context.TrackWarning($"Quarry '{query.Name}': {ex.Message}");
             return "";
         }
         catch (Exception ex)
         {
-            context.TrackWarning($"Quarry wildcard '{query.Name}' failed: {ex.Message}");
+            context.TrackWarning($"Quarry '{query.Name}' failed: {ex.Message}");
             Logs.Error($"Quarry: error processing '{data}': {ex.ReadableString()}");
             return "";
         }
     }
 
-    /// <summary>Matches a <c>&lt;wildcard:...&gt;</c> / <c>&lt;wc:...&gt;</c> reference tag (optional <c>[n]</c> /
-    /// <c>[n-m]</c> count, like core), capturing the inner <c>NAME[query]</c> data. Reserved chars <c>&lt; &gt;</c>
-    /// can't appear in a value, so stopping at the first <c>&gt;</c> is safe.</summary>
+    /// <summary>Matches a <c>&lt;q:...&gt;</c> reference tag (optional <c>[n]</c> / <c>[n-m]</c> count, like core),
+    /// capturing the inner <c>NAME[query]</c> data. Reserved chars <c>&lt; &gt;</c> can't appear in a value, so
+    /// stopping at the first <c>&gt;</c> is safe.</summary>
     private static readonly Regex ReferenceTagRegex =
-        new(@"<(?:wildcard|wc)(?:\[\d+(?:-\d+)?\])?:([^>]*)>", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        new(@"<q(?:\[\d+(?:-\d+)?\])?:([^>]*)>", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>Returns the distinct wildcard names of every dataset this extension would serve for the
-    /// <c>wc</c>/<c>wildcard</c> references in <paramref name="prompt"/>, resolved with the exact same name
+    /// <c>q</c> references in <paramref name="prompt"/>, resolved with the exact same name
     /// handling as real expansion (comma lists, globs, fuzzy match) so the settings UI can flag precisely what
     /// would be used. Filters are ignored — only the NAME part matters. Never throws: an unparseable or
     /// non-matching tag is skipped.</summary>
@@ -111,8 +111,9 @@ public static class WildcardHandler
 
     /// <summary>Resolves a reference NAME to the datasets it targets. A NAME may be a comma-separated list and
     /// each part may be a glob (<c>quarry/*</c>): globs match every known dataset, a plain name resolves via
-    /// the same fuzzy <see cref="T2IParamTypes.GetBestInList"/> used for single references. Results are
-    /// de-duplicated by lowercased name, preserving discovery order.</summary>
+    /// the same fuzzy <see cref="T2IParamTypes.GetBestInList"/> SwarmUI uses for wildcards — but against our own
+    /// dataset names, never the Wildcards folder. Results are de-duplicated by lowercased name, preserving
+    /// discovery order.</summary>
     private static List<DatasetEntry> ResolveTargets(string name)
     {
         List<DatasetEntry> targets = [];
@@ -131,7 +132,7 @@ public static class WildcardHandler
             }
             else
             {
-                string card = T2IParamTypes.GetBestInList(part, WildcardsHelper.ListFiles);
+                string card = T2IParamTypes.GetBestInList(part, DatasetManager.AllDatasetNames);
                 if (card is not null && DatasetManager.Resolve(card) is DatasetEntry entry && seen.Add(entry.WildcardName.ToLowerFast()))
                 {
                     targets.Add(entry);
@@ -265,27 +266,7 @@ public static class WildcardHandler
         return 0;
     }
 
-    private static string Estimator(string data, T2IPromptHandling.PromptTagContext context)
-    {
-        string name;
-        try
-        {
-            name = WildcardQueryParser.Parse(data).Name;
-        }
-        catch (WildcardQueryException)
-        {
-            return ChainEstimator(data, context);
-        }
-        if (ResolveTargets(name).Count > 0)
-        {
-            return ""; // length of a queried dataset row can't be estimated cheaply
-        }
-        return ChainEstimator(data, context);
-    }
-
-    private static string Chain(string data, T2IPromptHandling.PromptTagContext context)
-        => _originalProcessor is not null ? _originalProcessor(data, context) : null;
-
-    private static string ChainEstimator(string data, T2IPromptHandling.PromptTagContext context)
-        => _originalEstimator is not null ? _originalEstimator(data, context) : "";
+    /// <summary>Length estimate for a <c>&lt;q:...&gt;</c> tag. A queried dataset row can't be estimated cheaply
+    /// and an unmatched tag is dropped, so either way it contributes nothing — return empty.</summary>
+    private static string Estimator(string data, T2IPromptHandling.PromptTagContext context) => "";
 }

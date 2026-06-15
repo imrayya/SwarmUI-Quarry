@@ -1,49 +1,7 @@
-type ColumnKind = "scalar" | "list";
-
-interface ColumnDto {
-    name: string;
-    kind: ColumnKind;
-}
-
-interface DatasetDto {
-    name: string;
-    columns: ColumnDto[];
-    resolvedPromptColumn: string | null;
-    configuredPromptColumn: string | null;
-    configuredTagColumns: string[];
-    rowCount: number | null;
-    error: string | null;
-}
-
-interface SettingsResponse {
-    success: boolean;
-    enabled?: boolean;
-    datasetsFolder?: string;
-    active?: boolean;
-    count?: number;
-    datasets?: DatasetDto[];
-    message?: string;
-    error?: string;
-}
-
-interface PreviewResponse {
-    success: boolean;
-    dataset?: string;
-    columns?: string[];
-    rows?: string[][];
-    error?: string;
-}
-
-interface ReferencesResponse {
-    success: boolean;
-    names?: string[];
-}
+import { onReferences, recomputeReferences } from "./prompt";
+import type { DatasetDto, PreviewResponse, SettingsResponse } from "./types";
 
 const MESSAGE_TIMEOUT_MS = 5000;
-// Debounce prompt edits before asking the backend which datasets are referenced.
-const HIGHLIGHT_DEBOUNCE_MS = 250;
-// SwarmUI core's positive + negative prompt textareas (live in the page even when the Quarry tab is shown).
-const PROMPT_BOX_IDS = ["alt_prompt_textbox", "alt_negativeprompt_textbox"];
 export const PREVIEW_ROW_LIMIT = 100;
 const PREVIEW_MODAL_ID = "quarry-preview-modal";
 const PREVIEW_TITLE_ID = "quarry-preview-title";
@@ -231,47 +189,18 @@ export const collectTagColumns = (
 };
 
 let messageTimer: ReturnType<typeof setTimeout> | null = null;
-let highlightTimer: ReturnType<typeof setTimeout> | null = null;
 
-// The combined positive + negative prompt text, so a reference in either is detected.
-const readPromptText = (): string =>
-    PROMPT_BOX_IDS.map(
-        (id) =>
-            (document.getElementById(id) as HTMLTextAreaElement | null)
-                ?.value ?? "",
-    ).join("\n");
-
-// Recompute which dataset rows are referenced by the current prompt and flag them. Skips the backend
-// round-trip entirely when the prompt has no wc/wildcard tag (the common case), just clearing flags.
-const updateInPromptHighlights = (): void => {
+// Flags the dataset rows referenced by the current prompt; driven by the shared prompt watcher (prompt.ts).
+const applyTableHighlights = (names: string[]): void => {
     const container = document.getElementById("quarry-datasets");
-    if (!container) {
-        return;
+    if (container) {
+        applyInPromptHighlights(container, names);
     }
-    const prompt = readPromptText();
-    if (!/<(?:wc|wildcard)/i.test(prompt)) {
-        applyInPromptHighlights(container, []);
-        return;
-    }
-    genericRequest<ReferencesResponse>(
-        "QuarryResolveReferences",
-        { prompt },
-        (data) => {
-            if (data.success) {
-                applyInPromptHighlights(container, data.names ?? []);
-            }
-        },
-    );
 };
 
-const scheduleHighlightUpdate = (): void => {
-    if (highlightTimer) {
-        clearTimeout(highlightTimer);
-    }
-    highlightTimer = setTimeout(
-        updateInPromptHighlights,
-        HIGHLIGHT_DEBOUNCE_MS,
-    );
+// Tells the Quarry browser tab to reload its dataset list after a save/refresh (decoupled via a DOM event).
+const notifyDatasetsChanged = (): void => {
+    document.dispatchEvent(new CustomEvent("quarry:datasets-changed"));
 };
 
 const applyResponse = (data: SettingsResponse): void => {
@@ -298,7 +227,7 @@ const applyResponse = (data: SettingsResponse): void => {
     if (datasetsEl) {
         datasetsEl.innerHTML = renderDatasets(data.datasets ?? []);
         // The table was just rebuilt (highlight classes wiped) — recompute against the current prompt.
-        updateInPromptHighlights();
+        recomputeReferences();
     }
 };
 
@@ -348,6 +277,7 @@ const saveSettings = (): void => {
         (data) => {
             if (data.success) {
                 applyResponse(data);
+                notifyDatasetsChanged();
                 showMessage("Settings saved.", "success");
             } else {
                 showMessage(
@@ -372,11 +302,7 @@ const refresh = (): void => {
         }
         if (data.success) {
             applyResponse(data);
-            genericRequest(
-                "TriggerRefresh",
-                { refreshType: "wildcards" },
-                () => {},
-            );
+            notifyDatasetsChanged();
             showMessage(data.message ?? "Refreshed.", "success");
         } else {
             showMessage(
@@ -428,7 +354,7 @@ const hidePreviewModal = (): void => {
     }
 };
 
-const openPreview = (dataset: string): void => {
+export const openPreview = (dataset: string): void => {
     ensurePreviewModal();
     const titleEl = document.getElementById(PREVIEW_TITLE_ID);
     const bodyEl = document.getElementById(PREVIEW_BODY_ID);
@@ -483,13 +409,10 @@ const init = (): void => {
                 openPreview(dataset);
             }
         });
-    // Re-flag in-use datasets as the prompt changes. The textareas live on the generate tab but persist in
-    // the DOM, so edits there keep the (possibly hidden) Quarry table in sync for when it's next viewed.
-    for (const id of PROMPT_BOX_IDS) {
-        document
-            .getElementById(id)
-            ?.addEventListener("input", scheduleHighlightUpdate);
-    }
+    // Keep the table's "in prompt" flags in sync with the shared prompt watcher (started in main.ts). The
+    // prompt textareas live on the generate tab but persist in the DOM, so the table stays current even while
+    // the Quarry settings panel is hidden.
+    onReferences(applyTableHighlights);
 };
 
 export const quarry = {
