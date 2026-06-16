@@ -122,7 +122,7 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
             return Drain(reader);
         }
 
-        public void WriteImageHistory(string indexDir, string lancePath, string stagingJsonPath, string livePathsJsonPath)
+        public void WriteImageHistory(string indexDir, string lancePath, IReadOnlyList<string> stagingJsonPaths, string livePathsJsonPath)
         {
             EnsureLanceLoaded();
             Execute($"ATTACH {SqlText.QuoteLiteral(indexDir)} AS qidx (TYPE lance);");
@@ -133,9 +133,12 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
                 {
                     Execute(ImageHistoryIndex.CreateTableSql(tableRef));
                 }
-                if (stagingJsonPath is not null)
+                if (stagingJsonPaths is not null)
                 {
-                    Execute(ImageHistoryIndex.MergeUpsertSql(tableRef, SqlText.QuoteLiteral(stagingJsonPath)));
+                    foreach (string stagingJsonPath in stagingJsonPaths)
+                    {
+                        Execute(ImageHistoryIndex.MergeUpsertSql(tableRef, SqlText.QuoteLiteral(stagingJsonPath)));
+                    }
                 }
                 if (livePathsJsonPath is not null)
                 {
@@ -327,12 +330,12 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
         }
     }
 
-    public void WriteImageHistory(string indexDir, string lancePath, string stagingJsonPath, string livePathsJsonPath)
+    public void WriteImageHistory(string indexDir, string lancePath, IReadOnlyList<string> stagingJsonPaths, string livePathsJsonPath)
     {
         lock (_writeLock)
         {
             using Conn writer = new();
-            writer.WriteImageHistory(indexDir, lancePath, stagingJsonPath, livePathsJsonPath);
+            writer.WriteImageHistory(indexDir, lancePath, stagingJsonPaths, livePathsJsonPath);
         }
         lock (_lock)
         {

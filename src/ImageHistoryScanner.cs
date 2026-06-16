@@ -1,6 +1,5 @@
 using System.IO;
 using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 using SwarmUI.Accounts;
 using SwarmUI.Core;
 using SwarmUI.Utils;
@@ -143,13 +142,15 @@ public static class ImageHistoryScanner
         }
     }
 
+    private const int IndexBatchSize = 5_000;
+
     private static void RunScan(string userId, string root, bool starNoFolders, int id, CancellationTokenSource cts, CancellationToken cancel)
     {
         ScanState state = StateFor(userId);
         string segment = ImageHistoryIndex.SafeUserSegment(userId);
         string indexDir = ImageHistoryIndex.IndexDirFor(userId);
         string lancePath = ImageHistoryIndex.LancePathFor(userId);
-        string stagingPath = Path.Combine(DatasetManager.CacheFolder, $"imghist-staging-{segment}.json");
+        string stagingPrefix = Path.Combine(DatasetManager.CacheFolder, $"imghist-staging-{segment}-");
         string livePathsPath = Path.Combine(DatasetManager.CacheFolder, $"imghist-paths-{segment}.json");
         try
         {
@@ -165,36 +166,38 @@ public static class ImageHistoryScanner
             SetState(state, id, s => s.FilesDone = skipped);
 
             long indexedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            ConcurrentBag<ImageIndexRow> rows = [];
+            ParallelOptions parallelOptions = new()
+            {
+                MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount / 2, 2, 8),
+                CancellationToken = cancel,
+            };
+            SafeDeleteBatches(stagingPrefix);
+            List<string> stagingFiles = [];
             int done = 0;
-            Parallel.ForEach(
-                changed,
-                new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount / 2, 2, 8), CancellationToken = cancel },
-                file =>
+            foreach (ImageHistoryFile[] batch in changed.Chunk(IndexBatchSize))
+            {
+                cancel.ThrowIfCancellationRequested();
+                ImageIndexRow[] batchRows = new ImageIndexRow[batch.Length];
+                Parallel.For(0, batch.Length, parallelOptions, i =>
                 {
-                    rows.Add(ImageMetadataExtractor.Extract(file, root, starNoFolders, indexedAt));
+                    batchRows[i] = ImageMetadataExtractor.Extract(batch[i], root, starNoFolders, indexedAt);
                     int progress = Interlocked.Increment(ref done);
                     if ((progress & 63) == 0)
                     {
                         SetState(state, id, s => s.FilesDone = skipped + progress);
                     }
                 });
+                string batchFile = $"{stagingPrefix}{stagingFiles.Count}.json";
+                WriteRowsJson(batchFile, batchRows);
+                stagingFiles.Add(batchFile);
+            }
             cancel.ThrowIfCancellationRequested();
 
-            SetState(state, id, s => { s.FilesDone = files.Count; s.FilesIndexed = rows.Count; s.State = "finalizing"; });
-            Directory.CreateDirectory(indexDir);
-            string staging = null;
-            if (!rows.IsEmpty)
-            {
-                JArray rowArray = [.. rows.Select(r => r.ToJson())];
-                File.WriteAllText(stagingPath, rowArray.ToString(Formatting.None));
-                staging = stagingPath;
-            }
+            SetState(state, id, s => { s.FilesDone = files.Count; s.FilesIndexed = done; s.State = "finalizing"; });
             string livePaths = null;
             if (files.Count > 0 || existing.Count == 0)
             {
-                JArray pathArray = [.. files.Select(f => new JObject { ["path"] = f.RelativePath })];
-                File.WriteAllText(livePathsPath, pathArray.ToString(Formatting.None));
+                WritePathsJson(livePathsPath, files);
                 livePaths = livePathsPath;
             }
             else
@@ -203,13 +206,14 @@ public static class ImageHistoryScanner
                 prunedCount = 0;
             }
 
-            if (staging is not null || livePaths is not null)
+            if (stagingFiles.Count > 0 || livePaths is not null)
             {
-                DatasetManager.Backend.WriteImageHistory(indexDir, lancePath, staging, livePaths);
+                Directory.CreateDirectory(indexDir);
+                DatasetManager.Backend.WriteImageHistory(indexDir, lancePath, stagingFiles, livePaths);
             }
             ImageHistorySearch.InvalidateFields(userId);
             SetState(state, id, s => { s.State = "done"; s.FilesPruned = prunedCount; });
-            Logs.Info($"Quarry: image-history scan for '{userId}' indexed {rows.Count} new/changed and pruned {prunedCount} of {files.Count} file(s).");
+            Logs.Info($"Quarry: image-history scan for '{userId}' indexed {done} new/changed and pruned {prunedCount} of {files.Count} file(s).");
         }
         catch (OperationCanceledException)
         {
@@ -223,7 +227,7 @@ public static class ImageHistoryScanner
         }
         finally
         {
-            SafeDelete(stagingPath);
+            SafeDeleteBatches(stagingPrefix);
             SafeDelete(livePathsPath);
             lock (state.Lock)
             {
@@ -260,6 +264,54 @@ public static class ImageHistoryScanner
         catch (Exception ex)
         {
             Logs.Debug($"Quarry: could not remove temp file '{path}': {ex.Message}");
+        }
+    }
+
+    internal static void WriteRowsJson(string path, IReadOnlyList<ImageIndexRow> rows)
+    {
+        using StreamWriter writer = new(path, append: false);
+        using JsonTextWriter json = new(writer) { Formatting = Formatting.None };
+        json.WriteStartArray();
+        foreach (ImageIndexRow row in rows)
+        {
+            row.ToJson().WriteTo(json);
+        }
+        json.WriteEndArray();
+    }
+
+    internal static void WritePathsJson(string path, IReadOnlyList<ImageHistoryFile> files)
+    {
+        using StreamWriter writer = new(path, append: false);
+        using JsonTextWriter json = new(writer) { Formatting = Formatting.None };
+        json.WriteStartArray();
+        foreach (ImageHistoryFile file in files)
+        {
+            json.WriteStartObject();
+            json.WritePropertyName("path");
+            json.WriteValue(file.RelativePath);
+            json.WriteEndObject();
+        }
+        json.WriteEndArray();
+    }
+
+    private static void SafeDeleteBatches(string pathPrefix)
+    {
+        try
+        {
+            string dir = Path.GetDirectoryName(pathPrefix);
+            string namePrefix = Path.GetFileName(pathPrefix);
+            if (dir is null || !Directory.Exists(dir))
+            {
+                return;
+            }
+            foreach (string file in Directory.EnumerateFiles(dir, $"{namePrefix}*.json"))
+            {
+                SafeDelete(file);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"Quarry: could not clean up image-history staging batches '{pathPrefix}*': {ex.Message}");
         }
     }
 }
