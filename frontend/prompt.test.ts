@@ -89,10 +89,13 @@ describe("computePromptEdit — toggle off (the duplicate-click fix)", () => {
         );
     });
 
-    it("removes a filtered tag entirely when its only dataset is clicked", () => {
-        expect(computePromptEdit("<q:A[tags=x]>", 0, "A", false).value).toBe(
-            "",
-        );
+    it("boils a filtered tag down to an empty <q:[filter]> when its only dataset is clicked", () => {
+        // The query is worth keeping even with no dataset left, so the tag is not dropped — it becomes an
+        // empty `<q:[filter]>` shell that a later dataset click re-fills. (See the dedicated describe below.)
+        expect(computePromptEdit("<q:A[tags=x]>", 0, "A", false)).toEqual({
+            value: "<q:[tags=x]>",
+            cursor: 12,
+        });
     });
 
     it("collapses surrounding text to a single space when dropping a tag", () => {
@@ -150,6 +153,7 @@ describe("computePromptEdit — add to existing tag", () => {
 
     it("toggles a dataset off from inside a filtered tag", () => {
         // Regression: a filtered tag must still be recognized on re-click, so it's removed (not re-appended).
+        // The last dataset leaving keeps the query as an empty `<q:[filter]>` shell rather than vanishing.
         expect(
             computePromptEdit(
                 "<q:Aconexx.CivitAI-Flux-Prompts[tags=girl]>",
@@ -157,7 +161,7 @@ describe("computePromptEdit — add to existing tag", () => {
                 "Aconexx.CivitAI-Flux-Prompts",
                 true,
             ).value,
-        ).toBe("");
+        ).toBe("<q:[tags=girl]>");
     });
 });
 
@@ -189,6 +193,79 @@ describe("computePromptEdit — prompt-column suffix is preserved", () => {
         expect(
             computePromptEdit("<q:A[url=http://x]>", 19, "B", true).value,
         ).toBe("<q:A,B[url=http://x]>");
+    });
+});
+
+// Removing the last dataset from a filtered tag keeps an "empty" `<q:[filter]>` so the carefully-built query
+// survives and a later dataset click re-fills it — instead of starting a fresh, filter-less tag.
+describe("computePromptEdit — boil down to an empty filtered tag", () => {
+    it("keeps the [filter] when the last dataset is removed (the boil-down)", () => {
+        expect(computePromptEdit("<q:A[tags=x]>", 0, "A", true).value).toBe(
+            "<q:[tags=x]>",
+        );
+    });
+
+    it("still drops a no-filter tag entirely (only a kept query survives)", () => {
+        expect(computePromptEdit("<q:A>", 0, "A", true).value).toBe("");
+    });
+
+    it("preserves the [count] prefix while boiling down", () => {
+        expect(computePromptEdit("<q[3]:A[tags=x]>", 0, "A", true).value).toBe(
+            "<q[3]:[tags=x]>",
+        );
+    });
+
+    it("preserves the :column suffix while boiling down", () => {
+        expect(computePromptEdit("<q:A[tags=x]:cap>", 0, "A", true).value).toBe(
+            "<q:[tags=x]:cap>",
+        );
+    });
+
+    it("walks a two-dataset filtered tag down to an empty shell, one click at a time", () => {
+        // The reported flow: <q:A,B[...]> -> remove B -> <q:A[...]> -> remove A -> <q:[...]>.
+        const filter = "[tags=woman; tags!=buzz; prompt!=buzz]";
+        const afterB = computePromptEdit(`<q:A,B${filter}>`, 0, "B", true);
+        expect(afterB.value).toBe(`<q:A${filter}>`);
+        const afterA = computePromptEdit(afterB.value, 0, "A", true);
+        expect(afterA.value).toBe(`<q:${filter}>`);
+    });
+
+    it("re-fills an empty filtered tag when a dataset is clicked (add-to-existing on)", () => {
+        // The whole point: clicking C onto `<q:[tags=x]>` rebuilds it as `<q:C[tags=x]>`, query intact, rather
+        // than opening a separate tag.
+        expect(computePromptEdit("<q:[tags=x]>", 12, "C", true).value).toBe(
+            "<q:C[tags=x]>",
+        );
+    });
+
+    it("round-trips a real dotted name + multi-clause filter down to an empty shell and back", () => {
+        const filter = "[tags=woman; tags!=buzz; prompt!=buzz]";
+        const start = `<q:Aconexx.CivitAI-Flux-Prompts,AlekseyKorshuk.midjourney-prompts-text-dedup${filter}>`;
+        const dropSecond = computePromptEdit(
+            start,
+            0,
+            "AlekseyKorshuk.midjourney-prompts-text-dedup",
+            true,
+        );
+        expect(dropSecond.value).toBe(
+            `<q:Aconexx.CivitAI-Flux-Prompts${filter}>`,
+        );
+        const dropFirst = computePromptEdit(
+            dropSecond.value,
+            0,
+            "Aconexx.CivitAI-Flux-Prompts",
+            true,
+        );
+        expect(dropFirst.value).toBe(`<q:${filter}>`);
+        // Clicking a new dataset re-fills the kept query.
+        expect(
+            computePromptEdit(
+                dropFirst.value,
+                0,
+                "wtcherr.midjourney-prompts",
+                true,
+            ).value,
+        ).toBe(`<q:wtcherr.midjourney-prompts${filter}>`);
     });
 });
 

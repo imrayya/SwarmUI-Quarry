@@ -319,7 +319,7 @@
         continue;
       }
       const remaining = tag.names.filter((_, i) => i !== index);
-      if (remaining.length > 0) {
+      if (remaining.length > 0 || tag.filter.length > 0) {
         const rebuilt = buildTag(tag, remaining);
         return {
           value: value.slice(0, tag.start) + rebuilt + value.slice(tag.end),
@@ -1040,7 +1040,6 @@
       },
       () => {
       }
-      // best-effort resume; ignore a status hiccup on first open
     );
   };
   var wireEvents = () => {

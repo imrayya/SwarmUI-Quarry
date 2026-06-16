@@ -30,6 +30,14 @@ public static class PromptTagHandler
             }
             return "";
         }
+        if (string.IsNullOrEmpty(query.Name))
+        {
+            if (DatasetManager.IsActive)
+            {
+                context.TrackWarning($"Quarry: ignoring '<q:{data}>' (it has a query filter but no dataset selected).");
+            }
+            return "";
+        }
         List<DatasetEntry> targets = ResolveTargets(query.Name);
         if (targets.Count == 0)
         {

@@ -28,10 +28,6 @@ public static class QueryParser
             throw new QueryParseException($"Query '{data}' is missing a closing ']'.");
         }
         string name = head[..open].Trim();
-        if (name.Length == 0)
-        {
-            throw new QueryParseException($"Query '{data}' has an empty name.");
-        }
         string body = head[(open + 1)..^1];
         List<QueryClause> clauses = ParseClauses(body, data);
         if (clauses.Count == 0)
@@ -42,10 +38,6 @@ public static class QueryParser
         return new Query(name, clauses, promptColumn);
     }
 
-    /// Peels off the optional ":column" prompt-column override that trails the name and any "[filter]".
-    /// The separator is searched for only AFTER the filter's closing ']' so a ':' inside a filter value
-    /// (e.g. a url) is never mistaken for it. Returns the remaining head (name + filter) and the column,
-    /// or the original data and null when no override is present.
     private static (string head, string promptColumn) SplitPromptColumn(string data)
     {
         int searchFrom = data.LastIndexOf(']') + 1;

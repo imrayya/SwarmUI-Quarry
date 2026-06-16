@@ -253,8 +253,32 @@ public class QueryParserTests
     }
 
     [Fact]
-    public void EmptyNameBeforeBracket_Throws()
+    public void EmptyNameBeforeBracket_ParsesAsFilterOnly()
     {
-        Assert.Throws<QueryParseException>(() => QueryParser.Parse("[tags=a]"));
+        // A filter with no dataset name is the "boiled-down" empty tag (`<q:[tags=a]>`): every dataset was
+        // toggled off but the query was kept. It parses to a name-less query whose clauses survive; the handler
+        // ignores it at generation time.
+        Query q = QueryParser.Parse("[tags=a]");
+        Assert.Equal("", q.Name);
+        Assert.True(q.HasFilter);
+        QueryClause c = Assert.Single(q.Clauses);
+        Assert.Equal("tags", c.Column);
+        Assert.Equal(new[] { "a" }, c.Values);
+    }
+
+    [Fact]
+    public void EmptyNameBeforeBracket_KeepsPromptColumn()
+    {
+        Query q = QueryParser.Parse("[tags=a]:caption");
+        Assert.Equal("", q.Name);
+        Assert.Equal("caption", q.PromptColumn);
+        Assert.Single(q.Clauses);
+    }
+
+    [Fact]
+    public void EmptyNameAndEmptyBrackets_Throws()
+    {
+        // No name AND no clause is not a kept query — it's malformed, so it still throws.
+        Assert.Throws<QueryParseException>(() => QueryParser.Parse("[]"));
     }
 }
