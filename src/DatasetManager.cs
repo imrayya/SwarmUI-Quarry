@@ -18,6 +18,10 @@ public static class DatasetManager
     public const int MaxPreviewLimit = 10000;
     private static DuckDbQueryBackend _backend;
     public static DuckDbQueryBackend Backend => _backend ??= new DuckDbQueryBackend();
+    private static readonly SingleFlight<string, ColumnSchema> _schemaFlight = new(StringComparer.Ordinal);
+    private static readonly SingleFlight<string, long> _rowCountFlight = new(StringComparer.Ordinal);
+    private static readonly SingleFlight<string, long> _filteredCountFlight = new(StringComparer.Ordinal);
+    private static readonly SingleFlight<string, DatasetCache.PreviewData> _previewFlight = new(StringComparer.Ordinal);
 
     public static bool RequirementsInstalled
     {
@@ -96,9 +100,16 @@ public static class DatasetManager
         {
             return cached;
         }
-        ColumnSchema schema = Backend.GetSchema(entry.Path);
-        DatasetCache.StoreSchema(key, entry.FileHash, schema);
-        return schema;
+        return _schemaFlight.GetOrBuild(key, () =>
+        {
+            if (DatasetCache.TryGetSchema(key, entry.FileHash, out ColumnSchema settled))
+            {
+                return settled;
+            }
+            ColumnSchema schema = Backend.GetSchema(entry.Path);
+            DatasetCache.StoreSchema(key, entry.FileHash, schema);
+            return schema;
+        });
     }
 
     public static long GetRowCount(DatasetEntry entry, string promptColumn)
@@ -109,9 +120,17 @@ public static class DatasetManager
         {
             return cached;
         }
-        long count = Backend.CountRows(entry.Path, SqlFilter.None);
-        DatasetCache.StoreRowCount(key, entry.FileHash, column, count);
-        return count;
+        string rcKey = $"{key}|{entry.FileHash}|rc|{column}";
+        return _rowCountFlight.GetOrBuild(rcKey, () =>
+        {
+            if (DatasetCache.TryGetRowCount(key, entry.FileHash, column, out long settled))
+            {
+                return settled;
+            }
+            long count = Backend.CountRows(entry.Path, SqlFilter.None);
+            DatasetCache.StoreRowCount(key, entry.FileHash, column, count);
+            return count;
+        });
     }
 
     public static bool TryGetFilteredCount(DatasetEntry entry, SqlFilter filter, out long count)
@@ -124,8 +143,16 @@ public static class DatasetManager
         {
             return cached;
         }
-        long count = Backend.CountRows(entry.Path, filter);
-        DatasetCache.StoreFilteredCount(key, count);
+        long count = _filteredCountFlight.GetOrBuild(key, () =>
+        {
+            if (DatasetCache.TryGetFilteredCount(key, out long settled))
+            {
+                return settled;
+            }
+            long built = Backend.CountRows(entry.Path, filter);
+            DatasetCache.StoreFilteredCount(key, built);
+            return built;
+        });
         DatasetCache.PersistIfDirty();
         return count;
     }
@@ -202,10 +229,20 @@ public static class DatasetManager
         }
         try
         {
-            (List<string> columns, List<List<string>> rows) = Backend.GetSampleRows(entry.Path, limit);
-            DatasetCache.StorePreview(key, entry.FileHash, new DatasetCache.PreviewData(limit, columns, rows));
+            string previewKey = $"{key}|{entry.FileHash}|preview|{limit}";
+            DatasetCache.PreviewData data = _previewFlight.GetOrBuild(previewKey, () =>
+            {
+                if (DatasetCache.TryGetPreview(key, entry.FileHash, limit, out DatasetCache.PreviewData settled))
+                {
+                    return settled;
+                }
+                (List<string> columns, List<List<string>> rows) = Backend.GetSampleRows(entry.Path, limit);
+                DatasetCache.PreviewData fresh = new(limit, columns, rows);
+                DatasetCache.StorePreview(key, entry.FileHash, fresh);
+                return fresh;
+            });
             DatasetCache.PersistIfDirty();
-            return (true, columns, rows, null);
+            return (true, data.Columns, data.Rows, null);
         }
         catch (Exception ex)
         {
