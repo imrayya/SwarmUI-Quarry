@@ -1504,6 +1504,7 @@
   var PREVIEW_STATUS_ID = "quarry-preview-status";
   var PREVIEW_LOAD_MORE_ID = "quarry-preview-loadmore";
   var PREVIEW_CLEAR_ID = "quarry-preview-clear";
+  var expandedFolders = /* @__PURE__ */ new Set();
   var renderDatasetOptions = (dataset) => dataset.columns.map((col) => {
     const selected = col.name === dataset.resolvedPromptColumn ? " selected" : "";
     const badge = col.kind === "list" ? " [list]" : "";
@@ -1524,32 +1525,84 @@
       row.classList.toggle("quarry-dataset-in-prompt", wanted.has(name));
     });
   };
-  var renderDatasetNameButton = (name) => `<button type="button" class="quarry-dataset-name quarry-dataset-name-link" data-dataset="${name}" title="Add a reference to this dataset to your prompt">${name}</button>`;
-  var renderDatasetRow = (dataset) => {
+  var renderDatasetNameButton = (name, label = name) => `<button type="button" class="quarry-dataset-name quarry-dataset-name-link" data-dataset="${name}" title="Add a reference to this dataset to your prompt">${label}</button>`;
+  var renderDatasetRow = (dataset, displayName = dataset.name) => {
     const name = escapeHtml(dataset.name);
+    const label = escapeHtml(displayName);
     if (dataset.error) {
       return `<tr class="quarry-dataset-row quarry-dataset-error" data-dataset="${name}">
-            <td>${renderDatasetNameButton(name)}</td>
+            <td class="quarry-dataset-name-cell">${renderDatasetNameButton(name, label)}</td>
             <td colspan="4"><span class="quarry-dataset-error-msg">⚠️ ${escapeHtml(dataset.error)}</span></td>
         </tr>`;
     }
     return `<tr class="quarry-dataset-row" data-dataset="${name}">
-        <td>${renderDatasetNameButton(name)}</td>
+        <td class="quarry-dataset-name-cell">${renderDatasetNameButton(name, label)}</td>
         <td><select class="quarry-dataset-column" data-dataset="${name}">${renderDatasetOptions(dataset)}</select></td>
         <td class="quarry-dataset-tags" title="Columns the 'tags' keyword searches across">${renderTagCheckboxes(dataset)}</td>
         <td class="quarry-dataset-rows" data-dataset="${name}" title="Rows in the dataset (loads when you preview it if not already counted)">${formatRowCount(dataset.rowCount)}</td>
         <td><button type="button" class="basic-button quarry-preview-button" data-dataset="${name}" title="Preview this dataset's rows (load more in the dialog)">Preview</button></td>
     </tr>`;
   };
-  var renderDatasets = (datasets2) => {
+  var datasetFolder = (name) => {
+    const slash = name.lastIndexOf("/");
+    return slash > 0 ? name.slice(0, slash) : null;
+  };
+  var datasetLeafName = (name) => name.slice(name.lastIndexOf("/") + 1);
+  var groupDatasetsByFolder = (datasets2) => {
+    const loose = [];
+    const byFolder = /* @__PURE__ */ new Map();
+    for (const dataset of datasets2) {
+      const folder = datasetFolder(dataset.name);
+      if (folder === null) {
+        loose.push(dataset);
+        continue;
+      }
+      const existing = byFolder.get(folder);
+      if (existing) {
+        existing.push(dataset);
+      } else {
+        byFolder.set(folder, [dataset]);
+      }
+    }
+    const groups = Array.from(byFolder, ([folder, ds]) => ({
+      folder,
+      datasets: ds
+    })).sort((a, b) => a.folder.localeCompare(b.folder));
+    return { loose, groups };
+  };
+  var renderFolderGroup = (group, expanded) => {
+    const folder = escapeHtml(group.folder);
+    const collapsedClass = expanded ? "" : " quarry-collapsed";
+    const rows = group.datasets.map(
+      (dataset) => renderDatasetRow(dataset, datasetLeafName(dataset.name))
+    ).join("");
+    return `<tbody class="quarry-folder-group${collapsedClass}" data-folder="${folder}">
+        <tr class="quarry-folder-row">
+            <td colspan="5">
+                <button type="button" class="quarry-folder-toggle" data-folder="${folder}" aria-expanded="${expanded}" title="Show or hide the datasets in this folder">
+                    <span class="quarry-folder-caret" aria-hidden="true"></span>
+                    <span class="quarry-folder-name">${folder}</span>
+                    <span class="quarry-folder-count" title="${group.datasets.length} dataset(s)">${group.datasets.length}</span>
+                </button>
+            </td>
+        </tr>
+        ${rows}
+    </tbody>`;
+  };
+  var renderDatasets = (datasets2, expandedFolders2 = /* @__PURE__ */ new Set()) => {
     if (!datasets2 || datasets2.length === 0) {
       return `<div class="quarry-datasets-empty">No datasets found. Set a folder containing CSV / JSON / JSONL / Parquet / Lance files, then Refresh.</div>`;
     }
+    const { loose, groups } = groupDatasetsByFolder(datasets2);
+    const groupBodies = groups.map(
+      (group) => renderFolderGroup(group, expandedFolders2.has(group.folder))
+    ).join("");
+    const looseBody = loose.length ? `<tbody>${loose.map((dataset) => renderDatasetRow(dataset)).join("")}</tbody>` : "";
     return `<table class="quarry-datasets-table">
         <thead>
             <tr><th>Dataset</th><th>Prompt column</th><th>Tag columns</th><th>Rows</th><th>Preview</th></tr>
         </thead>
-        <tbody>${datasets2.map(renderDatasetRow).join("")}</tbody>
+        ${groupBodies}${looseBody}
     </table>`;
   };
   var renderPreviewTable = (columns, rows) => {
@@ -1677,7 +1730,10 @@
     setCompletionDatasets(data.datasets);
     const datasetsEl = document.getElementById("quarry-datasets");
     if (datasetsEl) {
-      datasetsEl.innerHTML = renderDatasets(data.datasets ?? []);
+      datasetsEl.innerHTML = renderDatasets(
+        data.datasets ?? [],
+        expandedFolders
+      );
       recomputeReferences();
     }
   };
@@ -1944,8 +2000,27 @@
       }
     );
   };
+  var toggleFolder = (toggle) => {
+    const folder = toggle.getAttribute("data-folder");
+    const group = toggle.closest(".quarry-folder-group");
+    if (!folder || !group) {
+      return;
+    }
+    const collapsed = group.classList.toggle("quarry-collapsed");
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    if (collapsed) {
+      expandedFolders.delete(folder);
+    } else {
+      expandedFolders.add(folder);
+    }
+  };
   var datasetsClickHandler = (event) => {
     const target = event.target;
+    const folderToggle = target?.closest(".quarry-folder-toggle");
+    if (folderToggle) {
+      toggleFolder(folderToggle);
+      return;
+    }
     const previewButton = target?.closest(
       ".quarry-preview-button"
     );
@@ -1956,11 +2031,9 @@
       }
       return;
     }
-    const nameButton = target?.closest(
-      ".quarry-dataset-name-link"
-    );
-    if (nameButton) {
-      const dataset = nameButton.getAttribute("data-dataset");
+    const nameCell = target?.closest(".quarry-dataset-name-cell");
+    if (nameCell) {
+      const dataset = nameCell.querySelector(".quarry-dataset-name-link")?.getAttribute("data-dataset");
       if (dataset) {
         insertQuarryTag(dataset);
       }

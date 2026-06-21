@@ -28,6 +28,10 @@ const PREVIEW_STATUS_ID = "quarry-preview-status";
 const PREVIEW_LOAD_MORE_ID = "quarry-preview-loadmore";
 const PREVIEW_CLEAR_ID = "quarry-preview-clear";
 
+// Folders the user has manually expanded this session, by folder name. Empty = all collapsed (the default),
+// so groups start collapsed; expansions survive table re-renders (Save/Refresh) instead of snapping shut.
+const expandedFolders = new Set<string>();
+
 export const renderDatasetOptions = (dataset: DatasetDto): string =>
     dataset.columns
         .map((col) => {
@@ -69,20 +73,31 @@ export const applyInPromptHighlights = (
 };
 
 /// The dataset name rendered as a clickable control. Clicking it inserts (or toggles off) a `<q:NAME>`
-/// reference in the prompt — the same behavior the old browser-tab cards had. `name` is already HTML-escaped.
-export const renderDatasetNameButton = (name: string): string =>
-    `<button type="button" class="quarry-dataset-name quarry-dataset-name-link" data-dataset="${name}" title="Add a reference to this dataset to your prompt">${name}</button>`;
+/// reference in the prompt — the same behavior the old browser-tab cards had. `name` (the full dataset key
+/// used everywhere as the identity) and `label` (the visible text) are both already HTML-escaped. `label`
+/// defaults to `name`; folder-grouped rows pass the short leaf name while keeping the full `name` as identity.
+export const renderDatasetNameButton = (
+    name: string,
+    label: string = name,
+): string =>
+    `<button type="button" class="quarry-dataset-name quarry-dataset-name-link" data-dataset="${name}" title="Add a reference to this dataset to your prompt">${label}</button>`;
 
-export const renderDatasetRow = (dataset: DatasetDto): string => {
+/// Renders one dataset's `<tr>`. `displayName` is the visible name text (defaults to the full dataset name);
+/// rows nested under a folder group pass the short leaf name, while `data-dataset` always keeps the full name.
+export const renderDatasetRow = (
+    dataset: DatasetDto,
+    displayName: string = dataset.name,
+): string => {
     const name = escapeHtml(dataset.name);
+    const label = escapeHtml(displayName);
     if (dataset.error) {
         return `<tr class="quarry-dataset-row quarry-dataset-error" data-dataset="${name}">
-            <td>${renderDatasetNameButton(name)}</td>
+            <td class="quarry-dataset-name-cell">${renderDatasetNameButton(name, label)}</td>
             <td colspan="4"><span class="quarry-dataset-error-msg">⚠️ ${escapeHtml(dataset.error)}</span></td>
         </tr>`;
     }
     return `<tr class="quarry-dataset-row" data-dataset="${name}">
-        <td>${renderDatasetNameButton(name)}</td>
+        <td class="quarry-dataset-name-cell">${renderDatasetNameButton(name, label)}</td>
         <td><select class="quarry-dataset-column" data-dataset="${name}">${renderDatasetOptions(dataset)}</select></td>
         <td class="quarry-dataset-tags" title="Columns the 'tags' keyword searches across">${renderTagCheckboxes(dataset)}</td>
         <td class="quarry-dataset-rows" data-dataset="${name}" title="Rows in the dataset (loads when you preview it if not already counted)">${formatRowCount(dataset.rowCount)}</td>
@@ -90,15 +105,101 @@ export const renderDatasetRow = (dataset: DatasetDto): string => {
     </tr>`;
 };
 
-export const renderDatasets = (datasets: DatasetDto[]): string => {
+/// The folder a dataset lives in (everything before the last `/` in its name), or null when it sits at the
+/// top level. Dataset names mirror their on-disk relative path, so `anime/1girl` lives in folder `anime`.
+export const datasetFolder = (name: string): string | null => {
+    const slash = name.lastIndexOf("/");
+    return slash > 0 ? name.slice(0, slash) : null;
+};
+
+/// The short, leaf portion of a dataset name (after the last `/`) — what we show inside a folder group.
+export const datasetLeafName = (name: string): string =>
+    name.slice(name.lastIndexOf("/") + 1);
+
+export interface DatasetFolderGroup {
+    folder: string;
+    datasets: DatasetDto[];
+}
+
+/// Splits datasets into top-level ("loose") ones and per-folder groups. Folders are sorted alphabetically;
+/// datasets keep their original order within each. A flat list (no `/` in any name) yields no groups.
+export const groupDatasetsByFolder = (
+    datasets: DatasetDto[],
+): { loose: DatasetDto[]; groups: DatasetFolderGroup[] } => {
+    const loose: DatasetDto[] = [];
+    const byFolder = new Map<string, DatasetDto[]>();
+    for (const dataset of datasets) {
+        const folder = datasetFolder(dataset.name);
+        if (folder === null) {
+            loose.push(dataset);
+            continue;
+        }
+        const existing = byFolder.get(folder);
+        if (existing) {
+            existing.push(dataset);
+        } else {
+            byFolder.set(folder, [dataset]);
+        }
+    }
+    const groups = Array.from(byFolder, ([folder, ds]) => ({
+        folder,
+        datasets: ds,
+    })).sort((a, b) => a.folder.localeCompare(b.folder));
+    return { loose, groups };
+};
+
+/// One folder rendered as its own `<tbody>`: a clickable header row (caret + name + dataset count) followed by
+/// its dataset rows. Collapsing toggles the `quarry-collapsed` class on this `<tbody>`, which CSS uses to hide
+/// the member rows — the header stays put. Groups render collapsed unless `expanded` is true.
+export const renderFolderGroup = (
+    group: DatasetFolderGroup,
+    expanded: boolean,
+): string => {
+    const folder = escapeHtml(group.folder);
+    const collapsedClass = expanded ? "" : " quarry-collapsed";
+    const rows = group.datasets
+        .map((dataset) =>
+            renderDatasetRow(dataset, datasetLeafName(dataset.name)),
+        )
+        .join("");
+    return `<tbody class="quarry-folder-group${collapsedClass}" data-folder="${folder}">
+        <tr class="quarry-folder-row">
+            <td colspan="5">
+                <button type="button" class="quarry-folder-toggle" data-folder="${folder}" aria-expanded="${expanded}" title="Show or hide the datasets in this folder">
+                    <span class="quarry-folder-caret" aria-hidden="true"></span>
+                    <span class="quarry-folder-name">${folder}</span>
+                    <span class="quarry-folder-count" title="${group.datasets.length} dataset(s)">${group.datasets.length}</span>
+                </button>
+            </td>
+        </tr>
+        ${rows}
+    </tbody>`;
+};
+
+/// Renders the datasets table. Datasets sharing a folder (a `/` in their name) are grouped under a collapsible
+/// folder header; folders sit above the top-level datasets. `expandedFolders` names the folders to render
+/// expanded — everything else (the default) renders collapsed.
+export const renderDatasets = (
+    datasets: DatasetDto[],
+    expandedFolders: ReadonlySet<string> = new Set<string>(),
+): string => {
     if (!datasets || datasets.length === 0) {
         return `<div class="quarry-datasets-empty">No datasets found. Set a folder containing CSV / JSON / JSONL / Parquet / Lance files, then Refresh.</div>`;
     }
+    const { loose, groups } = groupDatasetsByFolder(datasets);
+    const groupBodies = groups
+        .map((group) =>
+            renderFolderGroup(group, expandedFolders.has(group.folder)),
+        )
+        .join("");
+    const looseBody = loose.length
+        ? `<tbody>${loose.map((dataset) => renderDatasetRow(dataset)).join("")}</tbody>`
+        : "";
     return `<table class="quarry-datasets-table">
         <thead>
             <tr><th>Dataset</th><th>Prompt column</th><th>Tag columns</th><th>Rows</th><th>Preview</th></tr>
         </thead>
-        <tbody>${datasets.map(renderDatasetRow).join("")}</tbody>
+        ${groupBodies}${looseBody}
     </table>`;
 };
 
@@ -261,7 +362,10 @@ const applyResponse = (data: SettingsResponse): void => {
     setCompletionDatasets(data.datasets);
     const datasetsEl = document.getElementById("quarry-datasets");
     if (datasetsEl) {
-        datasetsEl.innerHTML = renderDatasets(data.datasets ?? []);
+        datasetsEl.innerHTML = renderDatasets(
+            data.datasets ?? [],
+            expandedFolders,
+        );
         // The table was just rebuilt (highlight classes wiped) — recompute against the current prompt.
         recomputeReferences();
     }
@@ -579,11 +683,34 @@ const clearPreviewCache = (): void => {
     );
 };
 
-/// Click delegation for the datasets table: a preview button opens the preview modal; a dataset-name link
-/// drops a `<q:NAME>` reference into the prompt (or toggles it off if the dataset is already referenced) — the
-/// row's in-prompt highlight then follows via onReferences.
+/// Collapses or expands a folder group from its clicked header button: flips the `quarry-collapsed` class on
+/// the group's `<tbody>` (CSS hides/shows the member rows), updates `aria-expanded`, and records the new state
+/// in `expandedFolders` so a later table re-render keeps it.
+const toggleFolder = (toggle: HTMLElement): void => {
+    const folder = toggle.getAttribute("data-folder");
+    const group = toggle.closest<HTMLElement>(".quarry-folder-group");
+    if (!folder || !group) {
+        return;
+    }
+    const collapsed = group.classList.toggle("quarry-collapsed");
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    if (collapsed) {
+        expandedFolders.delete(folder);
+    } else {
+        expandedFolders.add(folder);
+    }
+};
+
+/// Click delegation for the datasets table: a folder header toggles its group open/closed; a preview button
+/// opens the preview modal; a dataset-name link drops a `<q:NAME>` reference into the prompt (or toggles it off
+/// if the dataset is already referenced) — the row's in-prompt highlight then follows via onReferences.
 const datasetsClickHandler = (event: Event): void => {
     const target = event.target as HTMLElement | null;
+    const folderToggle = target?.closest<HTMLElement>(".quarry-folder-toggle");
+    if (folderToggle) {
+        toggleFolder(folderToggle);
+        return;
+    }
     const previewButton = target?.closest<HTMLElement>(
         ".quarry-preview-button",
     );
@@ -594,11 +721,13 @@ const datasetsClickHandler = (event: Event): void => {
         }
         return;
     }
-    const nameButton = target?.closest<HTMLElement>(
-        ".quarry-dataset-name-link",
-    );
-    if (nameButton) {
-        const dataset = nameButton.getAttribute("data-dataset");
+    // The whole name cell is the click target (not just the inner button), so any click in the cell — padding
+    // and indent included — inserts the reference. The button inside still carries the dataset identity.
+    const nameCell = target?.closest<HTMLElement>(".quarry-dataset-name-cell");
+    if (nameCell) {
+        const dataset = nameCell
+            .querySelector<HTMLElement>(".quarry-dataset-name-link")
+            ?.getAttribute("data-dataset");
         if (dataset) {
             insertQuarryTag(dataset);
         }

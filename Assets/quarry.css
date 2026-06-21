@@ -71,7 +71,13 @@
     text-align: left;
 }
 
-.quarry-dataset-name-link:hover,
+/* The whole name cell is the click target (wired in settings.ts), so show the affordance across the cell:
+   a pointer cursor, and the name underlines whenever the cell is hovered — not only its exact text. */
+.quarry-dataset-name-cell {
+    cursor: pointer;
+}
+
+.quarry-dataset-name-cell:hover .quarry-dataset-name-link,
 .quarry-dataset-name-link:focus-visible {
     text-decoration: underline;
 }
@@ -103,6 +109,86 @@
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     color: var(--text-soft);
+}
+
+/* --- Folder grouping (collapsible) --- */
+.quarry-folder-row > td {
+    padding: 0;
+    border-top: 1px solid var(--light-border);
+}
+
+/* The whole header row is the toggle: a full-width button reset that reads as a section heading. */
+.quarry-folder-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    width: 100%;
+    margin: 0;
+    padding: 0.35rem 0.5rem;
+    border: none;
+    background: var(--background-soft);
+    color: var(--text);
+    font: inherit;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+}
+
+.quarry-folder-toggle:hover {
+    background: var(--background-gray);
+}
+
+.quarry-folder-toggle:focus-visible {
+    outline: 2px solid var(--emphasis);
+    outline-offset: -2px;
+}
+
+/* Caret glyphs mirror SwarmUI's own folder tree: down when open, right when collapsed. */
+.quarry-folder-caret {
+    display: inline-block;
+    width: 1em;
+    flex-shrink: 0;
+    text-align: center;
+    color: var(--text-soft);
+}
+
+.quarry-folder-caret::before {
+    content: "\02B9F";
+}
+
+.quarry-folder-group.quarry-collapsed .quarry-folder-caret::before {
+    content: "\02B9E";
+}
+
+.quarry-folder-name {
+    overflow-wrap: anywhere;
+}
+
+/* Highlight the folder name when its header is hovered or focused, mirroring the dataset-name links. */
+.quarry-folder-toggle:hover .quarry-folder-name,
+.quarry-folder-toggle:focus-visible .quarry-folder-name {
+    color: var(--emphasis);
+    text-decoration: underline;
+}
+
+.quarry-folder-count {
+    color: var(--text-soft);
+    font-weight: normal;
+    font-size: 0.85em;
+    font-variant-numeric: tabular-nums;
+    background: var(--background-gray);
+    border-radius: 999px;
+    padding: 0 0.45rem;
+}
+
+/* Collapsing simply hides the group's dataset rows; the header row stays. */
+.quarry-folder-group.quarry-collapsed .quarry-dataset-row {
+    display: none;
+}
+
+/* Indent datasets nested under a folder so the hierarchy reads at a glance. */
+.quarry-folder-group .quarry-dataset-row > td:first-child {
+    padding-left: 1.75rem;
 }
 
 .quarry-dataset-error {

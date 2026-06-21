@@ -3,15 +3,33 @@ import {
     applyInPromptHighlights,
     collectPromptColumns,
     collectTagColumns,
+    datasetFolder,
+    datasetLeafName,
     formatRowCount,
+    groupDatasetsByFolder,
     PREVIEW_LOAD_MORE_COUNT,
     PREVIEW_ROW_LIMIT,
     renderDatasetRow,
     renderDatasets,
+    renderFolderGroup,
     renderPreviewStatus,
     renderPreviewTable,
 } from "./settings";
+import type { DatasetDto } from "./types";
 import { escapeHtml } from "./util";
+
+/// Minimal valid dataset DTO for grouping/render tests; override just the fields a test cares about.
+const makeDataset = (
+    over: Partial<DatasetDto> & { name: string },
+): DatasetDto => ({
+    columns: [{ name: "prompt", kind: "scalar" }],
+    resolvedPromptColumn: "prompt",
+    configuredPromptColumn: null,
+    configuredTagColumns: [],
+    rowCount: 1,
+    error: null,
+    ...over,
+});
 
 describe("escapeHtml", () => {
     it("escapes angle brackets and ampersands", () => {
@@ -160,6 +178,33 @@ describe("renderDatasetRow", () => {
         expect(html).toContain("quarry-dataset-name-link");
         expect(html).toContain('data-dataset="bad"');
     });
+
+    it("shows a passed display name as the label but keeps the full name as identity", () => {
+        const html = renderDatasetRow(
+            makeDataset({ name: "anime/1girl" }),
+            "1girl",
+        );
+        // data-dataset (the identity used for <q:> tags, highlights, preview) stays the full name.
+        expect(html).toContain('data-dataset="anime/1girl"');
+        // The visible button label is the short leaf name.
+        expect(html).toContain(
+            'title="Add a reference to this dataset to your prompt">1girl</button>',
+        );
+        expect(html).not.toContain(">anime/1girl</button>");
+    });
+
+    it("wraps the name in an actionable cell so the whole TD is clickable", () => {
+        expect(renderDatasetRow(makeDataset({ name: "a" }))).toContain(
+            '<td class="quarry-dataset-name-cell">',
+        );
+    });
+
+    it("uses the actionable name cell on error rows too", () => {
+        const html = renderDatasetRow(
+            makeDataset({ name: "bad", columns: [], error: "boom" }),
+        );
+        expect(html).toContain('<td class="quarry-dataset-name-cell">');
+    });
 });
 
 describe("renderDatasets", () => {
@@ -193,6 +238,140 @@ describe("renderDatasets", () => {
         expect(html).toContain("<th>Rows</th>");
         expect(html).toContain('data-dataset="a"');
         expect(html).toContain('data-dataset="b"');
+    });
+
+    it("groups foldered datasets under a collapsible header, collapsed by default", () => {
+        const html = renderDatasets([
+            makeDataset({ name: "anime/1girl" }),
+            makeDataset({ name: "anime/2girls" }),
+        ]);
+        // A folder group tbody that starts collapsed, with the folder name and a count of its members.
+        expect(html).toContain('class="quarry-folder-group quarry-collapsed"');
+        expect(html).toContain('data-folder="anime"');
+        expect(html).toContain('aria-expanded="false"');
+        expect(html).toContain('<span class="quarry-folder-name">anime</span>');
+        expect(html).toContain(
+            '<span class="quarry-folder-count" title="2 dataset(s)">2</span>',
+        );
+        // Members show the short leaf name but keep the full identity.
+        expect(html).toContain('data-dataset="anime/1girl"');
+        expect(html).toContain(">1girl</button>");
+    });
+
+    it("renders a folder expanded when listed in expandedFolders", () => {
+        const html = renderDatasets(
+            [makeDataset({ name: "anime/1girl" })],
+            new Set(["anime"]),
+        );
+        expect(html).toContain('class="quarry-folder-group"');
+        expect(html).not.toContain("quarry-collapsed");
+        expect(html).toContain('aria-expanded="true"');
+    });
+
+    it("keeps top-level datasets ungrouped alongside folder groups", () => {
+        const html = renderDatasets([
+            makeDataset({ name: "loose" }),
+            makeDataset({ name: "anime/1girl" }),
+        ]);
+        // The folder group exists...
+        expect(html).toContain('data-folder="anime"');
+        // ...and the loose dataset is rendered without a folder header.
+        expect(html).toContain('data-dataset="loose"');
+        expect(html).toContain(">loose</button>");
+    });
+
+    it("sorts folder groups alphabetically", () => {
+        const html = renderDatasets([
+            makeDataset({ name: "zebra/a" }),
+            makeDataset({ name: "alpha/a" }),
+        ]);
+        expect(html.indexOf('data-folder="alpha"')).toBeLessThan(
+            html.indexOf('data-folder="zebra"'),
+        );
+    });
+
+    it("escapes folder names", () => {
+        const html = renderDatasets([makeDataset({ name: "a&<b/x" })]);
+        expect(html).toContain('data-folder="a&amp;&lt;b"');
+        expect(html).not.toContain('data-folder="a&<b"');
+    });
+});
+
+describe("datasetFolder", () => {
+    it("returns the directory portion of a foldered name", () => {
+        expect(datasetFolder("anime/1girl")).toBe("anime");
+        expect(datasetFolder("a/b/c")).toBe("a/b");
+    });
+
+    it("returns null for a top-level name", () => {
+        expect(datasetFolder("loose")).toBeNull();
+        expect(datasetFolder("Gustavosta.Stable-Diffusion-Prompts")).toBeNull();
+    });
+});
+
+describe("datasetLeafName", () => {
+    it("returns the part after the last slash", () => {
+        expect(datasetLeafName("anime/1girl")).toBe("1girl");
+        expect(datasetLeafName("a/b/c")).toBe("c");
+    });
+
+    it("returns the whole name when there is no slash", () => {
+        expect(datasetLeafName("loose")).toBe("loose");
+    });
+});
+
+describe("groupDatasetsByFolder", () => {
+    it("splits loose datasets from per-folder groups, sorting folders", () => {
+        const { loose, groups } = groupDatasetsByFolder([
+            makeDataset({ name: "loose" }),
+            makeDataset({ name: "zebra/a" }),
+            makeDataset({ name: "anime/1girl" }),
+            makeDataset({ name: "anime/2girls" }),
+        ]);
+        expect(loose.map((d) => d.name)).toEqual(["loose"]);
+        expect(groups.map((g) => g.folder)).toEqual(["anime", "zebra"]);
+        expect(groups[0].datasets.map((d) => d.name)).toEqual([
+            "anime/1girl",
+            "anime/2girls",
+        ]);
+    });
+
+    it("yields no groups for a fully flat list", () => {
+        const { loose, groups } = groupDatasetsByFolder([
+            makeDataset({ name: "a" }),
+            makeDataset({ name: "b" }),
+        ]);
+        expect(groups).toEqual([]);
+        expect(loose).toHaveLength(2);
+    });
+});
+
+describe("renderFolderGroup", () => {
+    it("renders a tbody with a header and one row per dataset", () => {
+        const html = renderFolderGroup(
+            {
+                folder: "anime",
+                datasets: [
+                    makeDataset({ name: "anime/1girl" }),
+                    makeDataset({ name: "anime/2girls" }),
+                ],
+            },
+            true,
+        );
+        expect(html).toContain("<tbody");
+        expect(html).toContain('class="quarry-folder-group"');
+        expect(html).toContain('aria-expanded="true"');
+        expect(html).toContain('data-dataset="anime/1girl"');
+        expect(html).toContain('data-dataset="anime/2girls"');
+    });
+
+    it("marks the group collapsed when not expanded", () => {
+        const html = renderFolderGroup(
+            { folder: "anime", datasets: [makeDataset({ name: "anime/x" })] },
+            false,
+        );
+        expect(html).toContain("quarry-collapsed");
+        expect(html).toContain('aria-expanded="false"');
     });
 });
 
