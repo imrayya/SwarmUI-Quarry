@@ -24,6 +24,33 @@ public static class DatasetNameMatching
 
     public static bool IsGlob(string pattern) => pattern is not null && (pattern.Contains('*') || pattern.Contains('?'));
 
+    public static string MatchMissingDirectory(string name, IEnumerable<string> candidates)
+    {
+        if (string.IsNullOrEmpty(name) || candidates is null)
+        {
+            return null;
+        }
+        string suffix = "/" + name;
+        string match = null;
+        foreach (string candidate in candidates)
+        {
+            if (candidate is null || !candidate.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            string prefix = candidate[..^suffix.Length];
+            if (prefix.Length == 0 || prefix.Contains('/'))
+            {
+                continue;
+            }
+            if (match is null || string.Compare(candidate, match, StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                match = candidate;
+            }
+        }
+        return match;
+    }
+
     public static bool GlobMatches(string pattern, string candidate)
     {
         if (pattern is null || candidate is null)

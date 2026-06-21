@@ -25,6 +25,7 @@ public class QuarryExtension : Extension
         LoadSettings();
         ApplyDefaultDatasetsFolder();
         DatasetManager.Initialize();
+        DatasetMigrator.RunInBackground();
         PromptTagHandler.Initialize();
 
         API.RegisterAPICall(QuarryGetSettings, false, Permissions.FundamentalGenerateTabAccess);

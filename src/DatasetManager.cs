@@ -74,7 +74,12 @@ public static class DatasetManager
         {
             return null;
         }
-        return Datasets.TryGetValue(name.ToLowerFast(), out DatasetEntry entry) ? entry : null;
+        if (Datasets.TryGetValue(name.ToLowerFast(), out DatasetEntry entry))
+        {
+            return entry;
+        }
+        string moved = DatasetNameMatching.MatchMissingDirectory(name, AllDatasetNames);
+        return moved is not null && Datasets.TryGetValue(moved.ToLowerFast(), out DatasetEntry movedEntry) ? movedEntry : null;
     }
 
     public static string GetConfiguredPromptColumn(string name) => ColumnConfig.GetPromptColumn(name);

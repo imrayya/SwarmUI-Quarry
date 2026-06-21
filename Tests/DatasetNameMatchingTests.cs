@@ -69,6 +69,55 @@ public class DatasetNameMatchingTests
     }
 
     [Fact]
+    public void MatchMissingDirectory_FindsRelocatedDataset()
+    {
+        string[] datasets = ["tags/deepghs.sankaku_full", "nl/midjourney"];
+        Assert.Equal("tags/deepghs.sankaku_full", DatasetNameMatching.MatchMissingDirectory("deepghs.sankaku_full", datasets));
+        Assert.Equal("nl/midjourney", DatasetNameMatching.MatchMissingDirectory("midjourney", datasets));
+    }
+
+    [Fact]
+    public void MatchMissingDirectory_IsCaseInsensitive()
+    {
+        string[] datasets = ["tags/deepghs.sankaku_full"];
+        Assert.Equal("tags/deepghs.sankaku_full", DatasetNameMatching.MatchMissingDirectory("DEEPGHS.Sankaku_Full", datasets));
+    }
+
+    [Fact]
+    public void MatchMissingDirectory_RequiresWholeTrailingSegment()
+    {
+        string[] datasets = ["tags/deepghs.sankaku_full"];
+        // A misspelling must not match.
+        Assert.Null(DatasetNameMatching.MatchMissingDirectory("deepghs.sankaku_fullbar", datasets));
+        // A partial final segment must not match (the boundary char before the name must be '/').
+        Assert.Null(DatasetNameMatching.MatchMissingDirectory("sankaku_full", datasets));
+    }
+
+    [Fact]
+    public void MatchMissingDirectory_MatchesNestedSubpath()
+    {
+        string[] datasets = ["tags/anime/1girl"];
+        Assert.Equal("tags/anime/1girl", DatasetNameMatching.MatchMissingDirectory("anime/1girl", datasets));
+        Assert.Null(DatasetNameMatching.MatchMissingDirectory("1girl", datasets));
+    }
+
+    [Fact]
+    public void MatchMissingDirectory_MultipleMatches_PicksAlphabeticallyFirst()
+    {
+        string[] datasets = ["tags/deepghs.sankaku_full", "nl/deepghs.sankaku_full"];
+        Assert.Equal("nl/deepghs.sankaku_full", DatasetNameMatching.MatchMissingDirectory("deepghs.sankaku_full", datasets));
+    }
+
+    [Fact]
+    public void MatchMissingDirectory_NoMatch_ReturnsNull()
+    {
+        string[] datasets = ["tags/other"];
+        Assert.Null(DatasetNameMatching.MatchMissingDirectory("deepghs.sankaku_full", datasets));
+        Assert.Null(DatasetNameMatching.MatchMissingDirectory("", datasets));
+        Assert.Null(DatasetNameMatching.MatchMissingDirectory("x", null));
+    }
+
+    [Fact]
     public void GlobMatches_EscapesRegexMetacharacters()
     {
         // A '.' in the pattern is literal, not "any char".

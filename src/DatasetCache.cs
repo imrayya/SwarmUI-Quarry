@@ -188,6 +188,31 @@ public static class DatasetCache
         }
     }
 
+    public static void Rename(string oldKey, string newKey)
+    {
+        if (string.IsNullOrEmpty(oldKey) || string.IsNullOrEmpty(newKey) || oldKey == newKey)
+        {
+            return;
+        }
+        lock (CacheLock)
+        {
+            if (Cache.TryRemove(oldKey, out CacheEntry entry))
+            {
+                Cache[newKey] = entry;
+                _cacheDirty = true;
+            }
+        }
+        string oldPrefix = oldKey + "|";
+        foreach (string key in FilteredCounts.Keys.ToList())
+        {
+            if (key.StartsWith(oldPrefix, StringComparison.Ordinal) && FilteredCounts.TryRemove(key, out long count))
+            {
+                FilteredCounts[newKey + key[oldKey.Length..]] = count;
+                _cacheDirty = true;
+            }
+        }
+    }
+
     public static void PersistIfDirty()
     {
         lock (CacheLock)
