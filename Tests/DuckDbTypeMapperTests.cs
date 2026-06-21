@@ -33,4 +33,45 @@ public class DuckDbTypeMapperTests
     {
         Assert.Equal(ColumnKind.List, DuckDbTypeMapper.MapKind(type));
     }
+
+    [Theory]
+    [InlineData("TINYINT")]
+    [InlineData("SMALLINT")]
+    [InlineData("INTEGER")]
+    [InlineData("BIGINT")]
+    [InlineData("HUGEINT")]
+    [InlineData("UTINYINT")]
+    [InlineData("UBIGINT")]
+    [InlineData("FLOAT")]
+    [InlineData("DOUBLE")]
+    [InlineData("REAL")]
+    [InlineData("DECIMAL(10,2)")]
+    [InlineData("DECIMAL(18, 3)")]
+    [InlineData("NUMERIC")]
+    [InlineData("integer")]
+    [InlineData("  BIGINT  ")]
+    public void NumericTypes(string type)
+    {
+        Assert.True(DuckDbTypeMapper.IsNumeric(type));
+    }
+
+    [Theory]
+    [InlineData("VARCHAR")]
+    [InlineData("BOOLEAN")]
+    [InlineData("DATE")]
+    [InlineData("TIMESTAMP")]
+    [InlineData("BLOB")]
+    [InlineData("UUID")]
+    [InlineData("MAP(VARCHAR, INTEGER)")]
+    [InlineData("STRUCT(a INTEGER)")]
+    [InlineData("INTEGER[]")] // a list of numbers is not a numeric scalar
+    [InlineData("DECIMAL[]")]
+    [InlineData("ARRAY(DOUBLE)")]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void NonNumericTypes(string type)
+    {
+        Assert.False(DuckDbTypeMapper.IsNumeric(type));
+    }
 }

@@ -104,7 +104,7 @@ A filter applies to **every** dataset in the tag. `<q:characters,creatures[tags=
 
 > Heads up on `<q:*[ ... ]>`: the very first time you use a particular filter across all datasets, Quarry has to look through each one to see what matches, so it can take a moment to warm up. It remembers the answer for each dataset, though, so the next time you use that same filter it is quick. (And if some datasets do not have the column you asked for, Quarry simply skips those and uses the ones that do, so a wildcard query never breaks.)
 
-### The three operators: `=`, `==`, `!=`
+### The operators: `=`, `==`, `!=`, `+=`, `-=`
 
 When you list several values, the operator decides how they have to match:
 
@@ -113,8 +113,12 @@ When you list several values, the operator decides how they have to match:
 | `=`  | match **any** of them  | `tags=punk,goth` keeps punk or goth |
 | `==` | match **all** of them  | `tags==punk,goth` keeps punk and goth |
 | `!=` | match **none** of them | `tags!=nsfw` drops anything nsfw |
+| `+=` | number is **at least**  | `score+=0.8` keeps entries scoring 0.8 or higher |
+| `-=` | number is **at most**   | `width-=768` keeps entries up to 768 wide |
 
-Easy way to remember: **`=` one, `==` all, `!=` none.**
+Easy way to remember: **`=` one, `==` all, `!=` none**, and for numbers **`+=` up, `-=` down**.
+
+The last two, `+=` (at least) and `-=` (at most), are for **number columns** (a rating, a width, a year). They use `+`/`-` rather than the usual `>=`/`<=` because SwarmUI reads a `>` as the end of the tag, so `>=` would cut the tag short. If you point `+=`/`-=` at a column that does not hold numbers, Quarry quietly skips that dataset rather than guessing — so across a wildcard like `<q:*[score+=0.8]>` only the datasets with a numeric `score` take part.
 
 Want more than one condition? Stack filters with a semicolon and Quarry requires all of them at once:
 
@@ -146,6 +150,8 @@ If a dataset does not have the column you asked for, Quarry quietly falls back t
 | `<q:prompts[tags=brunette,punk]>` | tagged brunette or punk |
 | `<q:prompts[tags==brunette,punk]>` | tagged brunette and punk |
 | `<q:prompts[tags!=nsfw]>` | not tagged nsfw |
+| `<q:prompts[score+=0.8]>` | a number column at least 0.8 |
+| `<q:prompts[width-=768]>` | a number column up to 768 |
 | `<q:midjourney[prompt=girl]>` | prompts containing "girl" |
 | `<q:*[tags=cyberpunk]>` | a cyberpunk entry from any top-level set |
 | `<q:**[tags=cyberpunk]>` | …the same, reaching into subfolders too |
@@ -161,7 +167,7 @@ You do not have to remember your dataset names. Start typing a Quarry tag in any
 - Type `<q` and **Quarry** shows up in the list of tags.
 - After `<q:` you get a list of **every dataset**. Keep typing to narrow it.
 - Type a comma and it suggests the **next dataset** for a combined pull (the ones you have already added drop out of the list).
-- With a single dataset, type `[` and it lists **that dataset's columns** to filter on, with its tag columns first — so `<q:characters[` immediately offers `tags`. Once you have picked a column it offers the three **operators** (`=` any, `==` all, `!=` none); after a `;` it starts over for your next condition.
+- With a single dataset, type `[` and it lists **that dataset's columns** to filter on, with its tag columns first — so `<q:characters[` immediately offers `tags`. Once you have picked a column it offers the **operators** (`=` any, `==` all, `!=` none, plus `+=` and `-=` when the column holds numbers); after a `;` it starts over for your next condition.
 - Type `:` (after the name and any `[filter]`) and it lists the **columns you can use as the prompt** — the default prompt column first — for the [`:column` override](#picking-the-prompt-column-qfoobar).
 
 Picking a suggestion leaves the tag open so you can keep going — add another comma, open a `[` filter, or just type `>` to finish.

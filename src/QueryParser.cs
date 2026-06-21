@@ -75,7 +75,7 @@ public static class QueryParser
         if (eq < 0)
         {
             throw new QueryParseException(
-                $"Clause '{clause}' in '{original}' is missing an operator (=, ==, or !=).");
+                $"Clause '{clause}' in '{original}' is missing an operator (=, ==, !=, +=, or -=).");
         }
         MatchOp op;
         int columnEnd;
@@ -83,6 +83,18 @@ public static class QueryParser
         if (eq > 0 && clause[eq - 1] == '!')
         {
             op = MatchOp.None;
+            columnEnd = eq - 1;
+            valueStart = eq + 1;
+        }
+        else if (eq > 0 && clause[eq - 1] == '+')
+        {
+            op = MatchOp.GreaterOrEqual;
+            columnEnd = eq - 1;
+            valueStart = eq + 1;
+        }
+        else if (eq > 0 && clause[eq - 1] == '-')
+        {
+            op = MatchOp.LessOrEqual;
             columnEnd = eq - 1;
             valueStart = eq + 1;
         }

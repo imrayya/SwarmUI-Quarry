@@ -63,7 +63,9 @@
   var FILTER_OPERATORS = [
     { op: "=", hint: "match any of the values" },
     { op: "==", hint: "match all of the values" },
-    { op: "!=", hint: "match none of the values" }
+    { op: "!=", hint: "match none of the values" },
+    { op: "+=", hint: "at least (number columns)", numericOnly: true },
+    { op: "-=", hint: "at most (number columns)", numericOnly: true }
   ];
   var findDataset = (list, name) => {
     const low = name.trim().toLowerCase();
@@ -96,7 +98,11 @@
     const push = (col, hint) => {
       if (!used.has(col.name.toLowerCase())) {
         used.add(col.name.toLowerCase());
-        result.push({ name: col.name, hint });
+        result.push({
+          name: col.name,
+          hint,
+          numeric: col.numeric ?? false
+        });
       }
     };
     for (const tag of dataset.tagColumns) {
@@ -154,7 +160,9 @@
     const frag = clause.trim().toLowerCase();
     const exact = columns.find((c) => c.name.toLowerCase() === frag);
     if (exact) {
-      return FILTER_OPERATORS.map((o) => ({
+      return FILTER_OPERATORS.filter(
+        (o) => !o.numericOnly || exact.numeric
+      ).map((o) => ({
         apply: `${head}${exact.name}${o.op}`,
         label: o.op,
         hint: o.hint

@@ -6,10 +6,11 @@ public enum ColumnKind
     List,
 }
 
-public sealed class ColumnInfo(string name, ColumnKind kind)
+public sealed class ColumnInfo(string name, ColumnKind kind, bool isNumeric = false)
 {
     public string Name { get; } = name;
     public ColumnKind Kind { get; } = kind;
+    public bool IsNumeric { get; } = isNumeric;
 }
 
 public sealed class ColumnSchema

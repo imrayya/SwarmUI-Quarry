@@ -139,6 +139,43 @@ public class QueryParserTests
     }
 
     [Fact]
+    public void GreaterOrEqualOperator()
+    {
+        QueryClause c = Assert.Single(QueryParser.Parse("p[score+=0.8]").Clauses);
+        Assert.Equal(MatchOp.GreaterOrEqual, c.Op);
+        Assert.Equal("score", c.Column);
+        Assert.Equal(new[] { "0.8" }, c.Values);
+    }
+
+    [Fact]
+    public void LessOrEqualOperator()
+    {
+        QueryClause c = Assert.Single(QueryParser.Parse("p[width-=768]").Clauses);
+        Assert.Equal(MatchOp.LessOrEqual, c.Op);
+        Assert.Equal("width", c.Column);
+        Assert.Equal(new[] { "768" }, c.Values);
+    }
+
+    [Fact]
+    public void ComparisonOperators_TrimWhitespaceAndKeepNegatives()
+    {
+        // The value after `-=` may itself be negative — it stays unambiguous because the marker is before the `=`.
+        QueryClause c = Assert.Single(QueryParser.Parse("p[ temp -= -5 ]").Clauses);
+        Assert.Equal(MatchOp.LessOrEqual, c.Op);
+        Assert.Equal("temp", c.Column);
+        Assert.Equal(new[] { "-5" }, c.Values);
+    }
+
+    [Fact]
+    public void GreaterOrEqual_NegativeBound()
+    {
+        QueryClause c = Assert.Single(QueryParser.Parse("p[temp+=-5]").Clauses);
+        Assert.Equal(MatchOp.GreaterOrEqual, c.Op);
+        Assert.Equal("temp", c.Column);
+        Assert.Equal(new[] { "-5" }, c.Values);
+    }
+
+    [Fact]
     public void AllOperator_DoubleEquals()
     {
         QueryClause c = Assert.Single(QueryParser.Parse("p[Prompt==girl,red]").Clauses);

@@ -18,6 +18,10 @@ public static class SqlFilterBuilder
         {
             if (tagColumns.Count > 0 && string.Equals(clause.Column, TagsKeyword, StringComparison.OrdinalIgnoreCase))
             {
+                if (clause.Op is MatchOp.GreaterOrEqual or MatchOp.LessOrEqual)
+                {
+                    throw new NonNumericComparisonException(TagsKeyword);
+                }
                 terms.Add(BuildMergedTagTerm(tagColumns, clause, parameters));
                 continue;
             }
@@ -27,6 +31,15 @@ public static class SqlFilterBuilder
                     $"Column '{clause.Column}' does not exist in dataset '{query.Name}'.");
             }
             string quoted = SqlText.QuoteIdentifier(column.Name);
+            if (clause.Op is MatchOp.GreaterOrEqual or MatchOp.LessOrEqual)
+            {
+                if (!column.IsNumeric)
+                {
+                    throw new NonNumericComparisonException(column.Name);
+                }
+                terms.Add(BuildNumericTerm(quoted, clause, parameters));
+                continue;
+            }
             string[] placeholders = new string[clause.Values.Count];
             for (int i = 0; i < clause.Values.Count; i++)
             {
@@ -60,6 +73,19 @@ public static class SqlFilterBuilder
             valueMatches[i] = perColumn.Length == 1 ? perColumn[0] : $"({string.Join(" OR ", perColumn)})";
         }
         return Combine(clause, valueMatches);
+    }
+
+    private static string BuildNumericTerm(string column, QueryClause clause, List<QueryParameter> parameters)
+    {
+        string op = clause.Op == MatchOp.GreaterOrEqual ? ">=" : "<=";
+        string[] checks = new string[clause.Values.Count];
+        for (int i = 0; i < clause.Values.Count; i++)
+        {
+            string name = $"p{parameters.Count}";
+            parameters.Add(new QueryParameter(name, clause.Values[i]));
+            checks[i] = $"{column} {op} TRY_CAST(${name} AS DOUBLE)";
+        }
+        return $"({string.Join(" OR ", checks)})";
     }
 
     private static string BuildContainsTerm(string column, QueryClause clause, string[] placeholders)

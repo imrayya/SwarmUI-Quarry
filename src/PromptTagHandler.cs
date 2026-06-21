@@ -246,7 +246,16 @@ public static class PromptTagHandler
             return null;
         }
         List<ColumnInfo> tagColumns = TagColumnResolver.Resolve(DatasetManager.GetConfiguredTagColumns(entry.Name), schema, promptColumn);
-        SqlFilter filter = SqlFilterBuilder.Build(query, schema, tagColumns);
+        SqlFilter filter;
+        try
+        {
+            filter = SqlFilterBuilder.Build(query, schema, tagColumns);
+        }
+        catch (NonNumericComparisonException ex)
+        {
+            Logs.Warning($"Quarry dataset '{entry.Name}': {ex.Message} Skipping this dataset.");
+            return null;
+        }
         return new PlanDraft(entry, promptColumn, filter);
     }
 

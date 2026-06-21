@@ -168,6 +168,65 @@ describe("computeQuarryCompletions — filter columns", () => {
         });
     });
 
+    it("adds `+=` and `-=` only for number-based columns", () => {
+        const rated: CompletionDataset = {
+            name: "rated",
+            columns: [
+                { name: "prompt", kind: "scalar" },
+                { name: "score", kind: "scalar", numeric: true },
+            ],
+            tagColumns: [],
+            promptColumn: "prompt",
+            rowCount: 10,
+        };
+        // A numeric column offers the comparison operators on top of the text ones...
+        expect(computeQuarryCompletions("rated[score", [rated])).toEqual([
+            {
+                apply: "<q:rated[score=",
+                label: "=",
+                hint: "match any of the values",
+            },
+            {
+                apply: "<q:rated[score==",
+                label: "==",
+                hint: "match all of the values",
+            },
+            {
+                apply: "<q:rated[score!=",
+                label: "!=",
+                hint: "match none of the values",
+            },
+            {
+                apply: "<q:rated[score+=",
+                label: "+=",
+                hint: "at least (number columns)",
+            },
+            {
+                apply: "<q:rated[score-=",
+                label: "-=",
+                hint: "at most (number columns)",
+            },
+        ]);
+        // ...while a text column in the same dataset keeps just the three matchers.
+        expect(
+            computeQuarryCompletions("rated[prompt", [rated]).map(
+                (c) => c.label,
+            ),
+        ).toEqual(["=", "==", "!="]);
+    });
+
+    it("stops suggesting columns once a `+=` / `-=` is typed", () => {
+        const rated: CompletionDataset = {
+            name: "rated",
+            columns: [{ name: "score", kind: "scalar", numeric: true }],
+            tagColumns: [],
+            promptColumn: "score",
+            rowCount: 10,
+        };
+        expect(computeQuarryCompletions("rated[score+=0", [rated])).toEqual([]);
+        expect(computeQuarryCompletions("rated[score-=7", [rated])).toEqual([]);
+    });
+
     it("does not offer columns for a multi-dataset tag", () => {
         expect(labels("characters,creatures[")).toEqual([]);
     });

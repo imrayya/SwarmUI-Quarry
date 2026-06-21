@@ -394,7 +394,19 @@ public static class DatasetManager
         {
             if (Directory.Exists(path))
             {
-                return $"dir:{new DirectoryInfo(path).LastWriteTimeUtc.Ticks}";
+                DirectoryInfo dir = new(path);
+                long newest = dir.LastWriteTimeUtc.Ticks;
+                int count = 0;
+                foreach (FileSystemInfo child in dir.EnumerateFileSystemInfos())
+                {
+                    count++;
+                    long ticks = child.LastWriteTimeUtc.Ticks;
+                    if (ticks > newest)
+                    {
+                        newest = ticks;
+                    }
+                }
+                return $"dir:{newest}:{count}";
             }
             FileInfo info = new(path);
             return $"{info.Length}:{info.LastWriteTimeUtc.Ticks}";

@@ -183,6 +183,7 @@ public class QuarryExtension : Extension
                     {
                         ["name"] = column.Name,
                         ["kind"] = column.Kind.ToString().ToLowerInvariant(),
+                        ["numeric"] = column.IsNumeric,
                     });
                 }
                 datasets.Add(new JObject

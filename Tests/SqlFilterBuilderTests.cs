@@ -21,6 +21,12 @@ public class SqlFilterBuilderTests
         return SqlFilterBuilder.Build(QueryParser.Parse(data), schema, tags);
     }
 
+    private static SqlFilter BuildNumeric(string data, params (string name, ColumnKind kind, bool numeric)[] cols)
+    {
+        ColumnSchema schema = new(cols.Select(c => new ColumnInfo(c.name, c.kind, c.numeric)));
+        return SqlFilterBuilder.Build(QueryParser.Parse(data), schema);
+    }
+
     [Fact]
     public void NoFilter_ReturnsEmpty()
     {
@@ -94,6 +100,89 @@ public class SqlFilterBuilderTests
         Assert.Equal(
             "NOT (len(list_filter(\"tags\", x -> contains(lower(x), lower($p0)))) > 0)",
             f.WhereClause);
+    }
+
+    // --- Numeric columns: >= / <= comparisons against a number-based column -------------------------
+
+    [Fact]
+    public void NumericGreaterOrEqual_BuildsComparison()
+    {
+        // Quarry syntax `+=` ("at least") compiles to SQL `>=` against the number column.
+        SqlFilter f = BuildNumeric("p[score+=0.8]", ("score", ColumnKind.Scalar, true));
+        Assert.Equal("(\"score\" >= TRY_CAST($p0 AS DOUBLE))", f.WhereClause);
+        Assert.Equal("0.8", Assert.Single(f.Parameters).Value);
+    }
+
+    [Fact]
+    public void NumericLessOrEqual_BuildsComparison()
+    {
+        // Quarry syntax `-=` ("at most") compiles to SQL `<=`.
+        SqlFilter f = BuildNumeric("p[width-=768]", ("width", ColumnKind.Scalar, true));
+        Assert.Equal("(\"width\" <= TRY_CAST($p0 AS DOUBLE))", f.WhereClause);
+        Assert.Equal("768", Assert.Single(f.Parameters).Value);
+    }
+
+    [Fact]
+    public void NumericComparison_MultipleValues_OrsThem()
+    {
+        SqlFilter f = BuildNumeric("p[score+=1,2]", ("score", ColumnKind.Scalar, true));
+        Assert.Equal(
+            "(\"score\" >= TRY_CAST($p0 AS DOUBLE) OR \"score\" >= TRY_CAST($p1 AS DOUBLE))",
+            f.WhereClause);
+        Assert.Equal(new[] { "1", "2" }, f.Parameters.Select(p => p.Value));
+    }
+
+    [Fact]
+    public void NumericComparison_NegativeBound_StaysOnValueSide()
+    {
+        SqlFilter f = BuildNumeric("p[temp-=-5]", ("temp", ColumnKind.Scalar, true));
+        Assert.Equal("(\"temp\" <= TRY_CAST($p0 AS DOUBLE))", f.WhereClause);
+        Assert.Equal("-5", Assert.Single(f.Parameters).Value);
+    }
+
+    [Fact]
+    public void NumericComparison_QuotesIdentifier_AndBindsValue()
+    {
+        // The value lands in a bound parameter (never the SQL text), and the column name is quote-escaped.
+        SqlFilter f = BuildNumeric("p[wei\"rd+=5]", ("wei\"rd", ColumnKind.Scalar, true));
+        Assert.Equal("(\"wei\"\"rd\" >= TRY_CAST($p0 AS DOUBLE))", f.WhereClause);
+        Assert.Equal("5", Assert.Single(f.Parameters).Value);
+    }
+
+    [Fact]
+    public void NumericComparison_MixedWithTextClause_ParamsSequential()
+    {
+        SqlFilter f = BuildNumeric(
+            "p[source=civitai;score+=0.8]",
+            ("source", ColumnKind.Scalar, false),
+            ("score", ColumnKind.Scalar, true));
+        Assert.Equal(
+            "(contains(lower(\"source\"), lower($p0))) AND (\"score\" >= TRY_CAST($p1 AS DOUBLE))",
+            f.WhereClause);
+        Assert.Equal(new[] { "civitai", "0.8" }, f.Parameters.Select(p => p.Value));
+    }
+
+    [Fact]
+    public void NumericComparison_OnNonNumericColumn_Throws()
+    {
+        // A scalar text column is not numeric, so `+=` must signal that the dataset should be skipped.
+        Assert.Throws<NonNumericComparisonException>(
+            () => BuildNumeric("p[name+=5]", ("name", ColumnKind.Scalar, false)));
+    }
+
+    [Fact]
+    public void NumericComparison_OnListColumn_Throws()
+    {
+        Assert.Throws<NonNumericComparisonException>(
+            () => BuildNumeric("p[tags-=5]", ("tags", ColumnKind.List, false)));
+    }
+
+    [Fact]
+    public void NumericComparison_OnMergedTagsKeyword_Throws()
+    {
+        // The `tags` keyword merges configured (text) tag columns; a numeric comparison can never apply.
+        Assert.Throws<NonNumericComparisonException>(
+            () => BuildWithTags("p[tags+=5]", ["bar"], ("foo", ColumnKind.Scalar), ("bar", ColumnKind.Scalar)));
     }
 
     // --- Mixed / general ----------------------------------------------------------------------------

@@ -70,7 +70,7 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
             {
                 string name = reader.GetString(nameOrdinal);
                 string type = reader.GetString(typeOrdinal);
-                columns.Add(new ColumnInfo(name, DuckDbTypeMapper.MapKind(type)));
+                columns.Add(new ColumnInfo(name, DuckDbTypeMapper.MapKind(type), DuckDbTypeMapper.IsNumeric(type)));
             }
             return new ColumnSchema(columns);
         }

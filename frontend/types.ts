@@ -3,6 +3,7 @@ export type ColumnKind = "scalar" | "list";
 export interface ColumnDto {
     name: string;
     kind: ColumnKind;
+    numeric?: boolean;
 }
 
 export interface DatasetDto {

@@ -5,6 +5,8 @@ public enum MatchOp
     Any,
     All,
     None,
+    GreaterOrEqual,
+    LessOrEqual,
 }
 
 public sealed class QueryClause(string column, MatchOp op, IReadOnlyList<string> values)
@@ -18,10 +20,6 @@ public sealed class Query(string name, IReadOnlyList<QueryClause> clauses, strin
 {
     public string Name { get; } = name;
     public IReadOnlyList<QueryClause> Clauses { get; } = clauses;
-
-    /// The column the tag asked to read the prompt from (the optional ":column" suffix), or null when the
-    /// tag did not specify one. Applied per-file with a fallback to each dataset's default prompt column.
     public string PromptColumn { get; } = promptColumn;
-
     public bool HasFilter => Clauses.Count > 0;
 }
