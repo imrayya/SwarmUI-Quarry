@@ -92,7 +92,7 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
                 $"SELECT {SqlText.QuoteIdentifier(promptColumn)} FROM {source.FromExpression}{Where(filter)} LIMIT 1 OFFSET {index};";
             Bind(cmd, filter);
             object result = cmd.ExecuteScalar();
-            return result is null or DBNull ? "" : result.ToString();
+            return StringifyPrompt(result);
         }
 
         public (string Value, bool Matches) GetCandidateAt(string datasetPath, string promptColumn, SqlFilter filter, long index)
@@ -108,7 +108,7 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
             {
                 return ("", false);
             }
-            string value = reader.IsDBNull(0) ? "" : reader.GetValue(0)?.ToString() ?? "";
+            string value = reader.IsDBNull(0) ? "" : StringifyPrompt(reader.GetValue(0));
             bool matches = !reader.IsDBNull(1) && Convert.ToBoolean(reader.GetValue(1));
             return (value, matches);
         }
@@ -446,6 +446,32 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
                 parts.Add(item is null or DBNull ? "" : item.ToString());
             }
             return $"[{string.Join(", ", parts)}]";
+        }
+        return value.ToString();
+    }
+
+    private static string StringifyPrompt(object value)
+    {
+        if (value is null or DBNull)
+        {
+            return "";
+        }
+        if (value is not string && value is System.Collections.IEnumerable enumerable)
+        {
+            List<string> parts = [];
+            foreach (object item in enumerable)
+            {
+                if (item is null or DBNull)
+                {
+                    continue;
+                }
+                string text = item.ToString();
+                if (text.Length > 0)
+                {
+                    parts.Add(text);
+                }
+            }
+            return string.Join(", ", parts);
         }
         return value.ToString();
     }

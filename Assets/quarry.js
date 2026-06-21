@@ -1132,8 +1132,14 @@
   var POLL_MS2 = 800;
   var sourceRepoUrl = (name) => {
     const top = name.split("/")[0];
+    if (top.length === 0) {
+      return null;
+    }
     const dot = top.indexOf(".");
-    if (dot <= 0 || dot >= top.length - 1) {
+    if (dot < 0) {
+      return `https://huggingface.co/${top}`;
+    }
+    if (dot === 0 || dot >= top.length - 1) {
       return null;
     }
     return `https://huggingface.co/datasets/${top.slice(0, dot)}/${top.slice(dot + 1)}`;

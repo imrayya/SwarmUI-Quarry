@@ -195,12 +195,21 @@ describe("sourceRepoUrl", () => {
         );
     });
 
-    it("returns null when there is no usable separator dot", () => {
-        expect(sourceRepoUrl("noseparator")).toBeNull();
+    it("links a dot-less folder to its HuggingFace org/user page", () => {
+        // A bare folder name (no org.repo dot) is a HuggingFace org/user; link to its page, preserving case.
+        expect(sourceRepoUrl("CyberHarem")).toBe(
+            "https://huggingface.co/CyberHarem",
+        );
+        // The org is taken from the top-level folder, even when the leaf carries a dot.
+        expect(sourceRepoUrl("noseparator/leaf.v2")).toBe(
+            "https://huggingface.co/noseparator",
+        );
+    });
+
+    it("returns null when the top-level folder can't name an org", () => {
+        expect(sourceRepoUrl("")).toBeNull();
         expect(sourceRepoUrl(".leading")).toBeNull();
         expect(sourceRepoUrl("trailing.")).toBeNull();
-        // The top-level folder has no usable dot, even though the leaf would.
-        expect(sourceRepoUrl("noseparator/leaf.v2")).toBeNull();
     });
 });
 
@@ -224,10 +233,22 @@ describe("renderRemoteDatasetName", () => {
         expect(html).toContain(">X779.Danbooruwildcards/DTR2024_1boy</a>");
     });
 
-    it("falls back to plain escaped text when no source repo can be derived", () => {
-        expect(renderRemoteDatasetName("plainname")).toBe("plainname");
+    it("links a dot-less name to its HuggingFace org/user page", () => {
+        const html = renderRemoteDatasetName("CyberHarem");
+        expect(html).toContain('href="https://huggingface.co/CyberHarem"');
+        expect(html).toContain(">CyberHarem</a>");
+    });
+
+    it("escapes the name in both the link and its title", () => {
         const evil = renderRemoteDatasetName("<evil>");
-        expect(evil).toBe("&lt;evil&gt;");
+        expect(evil).toContain("&lt;evil&gt;");
+        expect(evil).not.toContain("<evil>");
+    });
+
+    it("falls back to plain escaped text when no source repo can be derived", () => {
+        expect(renderRemoteDatasetName("trailing.")).toBe("trailing.");
+        const evil = renderRemoteDatasetName(".<evil>");
+        expect(evil).toBe(".&lt;evil&gt;");
         expect(evil).not.toContain("<a");
     });
 });
