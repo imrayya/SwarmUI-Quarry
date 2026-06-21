@@ -321,11 +321,11 @@ public class QuarryExtension : Extension
 
     private static string GetHfToken(Session session) => session?.User?.GetGenericData("huggingface_api", "key") ?? "";
 
-    public async Task<JObject> QuarryListAvailableDatasets(Session session)
+    public async Task<JObject> QuarryListAvailableDatasets(Session session, bool refresh = false)
     {
         try
         {
-            List<RemoteDataset> datasets = await DatasetDownloader.ListAvailableAsync(GetHfToken(session));
+            List<RemoteDataset> datasets = await DatasetDownloader.ListAvailableAsync(GetHfToken(session), refresh);
             JArray arr = [];
             foreach (RemoteDataset dataset in datasets)
             {

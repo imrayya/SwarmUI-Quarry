@@ -427,9 +427,43 @@
     color: var(--text-soft);
 }
 
-.quarry-remote-action {
+.quarry-remote-selcell {
+    width: 1%;
     white-space: nowrap;
-    min-width: 11rem;
+    text-align: center;
+}
+
+.quarry-remote-select,
+.quarry-remote-selectall {
+    cursor: pointer;
+}
+
+.quarry-remote-downloading {
+    box-shadow: inset 3px 0 0 var(--text-soft);
+}
+
+.quarry-download-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.quarry-download-footer-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.quarry-download-progress {
+    margin-top: 0.6rem;
+}
+
+.quarry-dl-label {
+    font-size: 0.9em;
+    color: var(--text-soft);
+    margin-bottom: 0.25rem;
+    overflow-wrap: anywhere;
 }
 
 .quarry-dl-progress {

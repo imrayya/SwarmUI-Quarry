@@ -10,7 +10,7 @@ import {
 import { formatBytes } from "./util";
 
 describe("renderRemoteDatasetRow", () => {
-    it("renders a not-installed dataset with a Download button", () => {
+    it("renders a not-installed dataset with an unchecked selection checkbox", () => {
         const html = renderRemoteDatasetRow({
             name: "Gustavosta.Stable-Diffusion-Prompts",
             repoPath: "Gustavosta.Stable-Diffusion-Prompts.lance",
@@ -25,16 +25,19 @@ describe("renderRemoteDatasetRow", () => {
         expect(html).toContain(
             'href="https://huggingface.co/datasets/Gustavosta/Stable-Diffusion-Prompts"',
         );
-        expect(html).toContain(">Download<");
-        expect(html).toContain('data-redownload="false"');
+        // A selection checkbox, flagged not-installed, with no per-row download button.
+        expect(html).toContain("quarry-remote-select");
+        expect(html).toContain('data-installed="false"');
+        expect(html).not.toContain(">Download<");
+        expect(html).not.toContain(">Redownload<");
         expect(html).toContain("9.8 MB");
         // The file count is intentionally not shown.
         expect(html).not.toContain("file");
         expect(html).not.toContain("quarry-remote-installed");
-        expect(html).not.toContain("quarry-remote-check");
+        expect(html).not.toContain("✓");
     });
 
-    it("renders an installed dataset with a checkmark and a Redownload button", () => {
+    it("renders an installed dataset with a checkmark and a pre-set redownload flag", () => {
         const html = renderRemoteDatasetRow({
             name: "DamarJati.SD-Prompts",
             repoPath: "DamarJati.SD-Prompts.lance",
@@ -44,8 +47,9 @@ describe("renderRemoteDatasetRow", () => {
         });
         expect(html).toContain("quarry-remote-installed");
         expect(html).toContain("quarry-remote-check");
-        expect(html).toContain(">Redownload<");
-        expect(html).toContain('data-redownload="true"');
+        expect(html).toContain("✓");
+        expect(html).toContain('data-installed="true"');
+        expect(html).not.toContain(">Redownload<");
         expect(html).toContain("22.2 KB");
     });
 
@@ -108,10 +112,22 @@ describe("sourceRepoUrl", () => {
         );
     });
 
+    it("derives the source repo from the top-level folder for a nested dataset", () => {
+        // Nested datasets carry a "parent/leaf" name; the source repo is named by the parent folder only.
+        expect(sourceRepoUrl("X779.Danbooruwildcards/DTR2024_1boy")).toBe(
+            "https://huggingface.co/datasets/X779/Danbooruwildcards",
+        );
+        expect(sourceRepoUrl("org.repo.v2/sub/leaf")).toBe(
+            "https://huggingface.co/datasets/org/repo.v2",
+        );
+    });
+
     it("returns null when there is no usable separator dot", () => {
         expect(sourceRepoUrl("noseparator")).toBeNull();
         expect(sourceRepoUrl(".leading")).toBeNull();
         expect(sourceRepoUrl("trailing.")).toBeNull();
+        // The top-level folder has no usable dot, even though the leaf would.
+        expect(sourceRepoUrl("noseparator/leaf.v2")).toBeNull();
     });
 });
 
@@ -123,6 +139,16 @@ describe("renderRemoteDatasetName", () => {
         );
         expect(html).toContain('target="_blank"');
         expect(html).toContain(">succinctly.midjourney-prompts</a>");
+    });
+
+    it("links a nested dataset to its top-level source repo while showing the full name", () => {
+        const html = renderRemoteDatasetName(
+            "X779.Danbooruwildcards/DTR2024_1boy",
+        );
+        expect(html).toContain(
+            'href="https://huggingface.co/datasets/X779/Danbooruwildcards"',
+        );
+        expect(html).toContain(">X779.Danbooruwildcards/DTR2024_1boy</a>");
     });
 
     it("falls back to plain escaped text when no source repo can be derived", () => {

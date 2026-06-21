@@ -1099,13 +1099,17 @@
   var MODAL_ID = "quarry-download-modal";
   var BODY_ID = "quarry-download-body";
   var MESSAGE_ID = "quarry-download-message";
+  var PROGRESS_ID = "quarry-download-progress";
+  var START_ID = "quarry-download-start";
+  var REFRESH_ID = "quarry-download-refresh";
   var POLL_MS2 = 800;
   var sourceRepoUrl = (name) => {
-    const dot = name.indexOf(".");
-    if (dot <= 0 || dot >= name.length - 1) {
+    const top = name.split("/")[0];
+    const dot = top.indexOf(".");
+    if (dot <= 0 || dot >= top.length - 1) {
       return null;
     }
-    return `https://huggingface.co/datasets/${name.slice(0, dot)}/${name.slice(dot + 1)}`;
+    return `https://huggingface.co/datasets/${top.slice(0, dot)}/${top.slice(dot + 1)}`;
   };
   var renderRemoteDatasetName = (name) => {
     const escaped = escapeHtml(name);
@@ -1120,13 +1124,13 @@
     const installed = dataset.installed;
     const rowClass = installed ? "quarry-remote-row quarry-remote-installed" : "quarry-remote-row";
     const check = installed ? `<span class="quarry-remote-check" title="Installed">✓</span> ` : "";
-    const label = installed ? "Redownload" : "Download";
+    const title = installed ? "Already installed — select to redownload" : "Select to download";
     return `<tr class="${rowClass}" data-dataset="${name}">
+        <td class="quarry-remote-selcell">
+            <input type="checkbox" class="quarry-remote-select" data-dataset="${name}" data-installed="${installed}" title="${title}" />
+        </td>
         <td class="quarry-remote-name">${check}${renderRemoteDatasetName(dataset.name)}</td>
         <td class="quarry-remote-size">${formatBytes(dataset.sizeBytes)}</td>
-        <td class="quarry-remote-action">
-            <button type="button" class="basic-button quarry-remote-download" data-dataset="${name}" data-redownload="${installed}">${label}</button>
-        </td>
     </tr>`;
   };
   var renderRemoteDatasets = (list) => {
@@ -1134,7 +1138,11 @@
       return `<div class="quarry-remote-empty">No datasets available right now.</div>`;
     }
     return `<table class="quarry-remote-table">
-        <thead><tr><th>Dataset</th><th>Size</th><th>Action</th></tr></thead>
+        <thead><tr>
+            <th class="quarry-remote-selcell"><input type="checkbox" class="quarry-remote-selectall" title="Select all" /></th>
+            <th>Dataset</th>
+            <th>Size</th>
+        </tr></thead>
         <tbody>${list.map(renderRemoteDatasetRow).join("")}</tbody>
     </table>`;
   };
@@ -1169,19 +1177,27 @@
   var currentList = [];
   var tokenSet = false;
   var repoUrl = "";
+  var queue = [];
+  var queueIndex = 0;
+  var queueTotal = 0;
+  var completedCount = 0;
+  var failedNames = [];
+  var cancelledBatch = false;
   var downloadingName = null;
   var lastRunId = 0;
   var pollTimer = null;
   var renderNote = () => {
     const repo = repoUrl ? `<a href="${escapeHtml(repoUrl)}" target="_blank" rel="noreferrer noopener">the official collection</a>` : "the official collection";
     const tokenHint = tokenSet ? "" : ` <span class="quarry-download-tokenhint">No HuggingFace token set — this public collection still downloads fine; set a token under the User tab for authenticated downloads.</span>`;
-    return `<div class="quarry-download-note">${currentList.length} dataset(s) from ${repo}.${tokenHint}</div>`;
+    return `<div class="quarry-download-note">${currentList.length} dataset(s) from ${repo}. Tick one or more and click Download.${tokenHint}</div>`;
   };
   var renderList = () => {
     const body2 = document.getElementById(BODY_ID);
     if (body2) {
       body2.innerHTML = renderNote() + renderRemoteDatasets(currentList);
     }
+    updateSelectAllState();
+    updateStartButtonState();
   };
   var showMessage = (text, type = "info") => {
     const el2 = document.getElementById(MESSAGE_ID);
@@ -1191,58 +1207,118 @@
     el2.textContent = text;
     el2.className = text ? `quarry-download-message quarry-download-message-${type}` : "quarry-download-message";
   };
-  var renderActionProgress = (status) => `<div class="quarry-dl-progress"><div class="quarry-dl-bar" style="width: ${progressPercent(status)}%"></div></div>
-     <div class="quarry-dl-info">${escapeHtml(renderProgressInfo(status))}</div>
-     <button type="button" class="basic-button quarry-remote-cancel">Cancel</button>`;
-  var rowFor = (name) => {
+  var rowCheckboxes = () => {
+    const body2 = document.getElementById(BODY_ID);
+    return body2 ? Array.from(
+      body2.querySelectorAll(".quarry-remote-select")
+    ) : [];
+  };
+  var selectAllCheckbox = () => document.getElementById(BODY_ID)?.querySelector(".quarry-remote-selectall") ?? null;
+  var selectedDatasets = () => rowCheckboxes().filter((cb) => cb.checked).map((cb) => ({
+    name: cb.getAttribute("data-dataset") ?? "",
+    redownload: cb.getAttribute("data-installed") === "true"
+  })).filter((item) => item.name !== "");
+  var updateStartButtonState = () => {
+    const start = document.getElementById(START_ID);
+    if (start) {
+      start.disabled = downloadingName !== null || selectedDatasets().length === 0;
+    }
+  };
+  var updateSelectAllState = () => {
+    const all = selectAllCheckbox();
+    if (!all) {
+      return;
+    }
+    const boxes = rowCheckboxes();
+    const checked = boxes.filter((cb) => cb.checked).length;
+    all.checked = boxes.length > 0 && checked === boxes.length;
+    all.indeterminate = checked > 0 && checked < boxes.length;
+  };
+  var setControlsDownloading = (downloading) => {
+    const body2 = document.getElementById(BODY_ID);
+    if (body2) {
+      for (const cb of Array.from(
+        body2.querySelectorAll(
+          ".quarry-remote-select, .quarry-remote-selectall"
+        )
+      )) {
+        cb.disabled = downloading;
+      }
+    }
+    const refresh2 = document.getElementById(
+      REFRESH_ID
+    );
+    if (refresh2) {
+      refresh2.disabled = downloading;
+    }
+    if (downloading) {
+      const start = document.getElementById(
+        START_ID
+      );
+      if (start) {
+        start.disabled = true;
+      }
+    } else {
+      updateStartButtonState();
+    }
+  };
+  var highlightActiveRow = (name) => {
     const body2 = document.getElementById(BODY_ID);
     if (!body2) {
-      return null;
+      return;
     }
     for (const row of Array.from(
       body2.querySelectorAll("tr.quarry-remote-row")
     )) {
-      if (row.getAttribute("data-dataset") === name) {
-        return row;
-      }
-    }
-    return null;
-  };
-  var markDownloadingUI = (name) => {
-    const body2 = document.getElementById(BODY_ID);
-    if (!body2) {
-      return;
-    }
-    for (const button of Array.from(
-      body2.querySelectorAll(".quarry-remote-download")
-    )) {
-      button.disabled = true;
-    }
-    const row = rowFor(name);
-    const action = row?.querySelector(".quarry-remote-action");
-    if (row && action) {
-      row.classList.add("quarry-remote-downloading");
-      action.innerHTML = renderActionProgress({
-        success: true,
-        state: "starting"
-      });
+      row.classList.toggle(
+        "quarry-remote-downloading",
+        name !== null && row.getAttribute("data-dataset") === name
+      );
     }
   };
-  var updateProgressUI = (name, status) => {
-    const row = rowFor(name);
-    if (!row) {
+  var progressLabel = () => {
+    const name = escapeHtml(downloadingName ?? "");
+    const counter = queueTotal > 1 ? `${queueIndex + 1} of ${queueTotal} · ` : "";
+    return `Downloading ${counter}${name}`;
+  };
+  var showBatchProgress = (status) => {
+    const panel = document.getElementById(PROGRESS_ID);
+    if (!panel) {
       return;
     }
-    if (!row.querySelector(".quarry-dl-bar")) {
-      markDownloadingUI(name);
+    panel.style.display = "block";
+    panel.innerHTML = `<div class="quarry-dl-label">${progressLabel()}</div>
+        <div class="quarry-dl-progress"><div class="quarry-dl-bar" style="width: ${progressPercent(status)}%"></div></div>
+        <div class="quarry-dl-info">${escapeHtml(renderProgressInfo(status))}</div>
+        <button type="button" class="basic-button quarry-remote-cancel">Cancel</button>`;
+  };
+  var updateBatchProgress = (status) => {
+    const panel = document.getElementById(PROGRESS_ID);
+    if (!panel) {
+      return;
     }
-    const bar = row.querySelector(".quarry-dl-bar");
-    const info = row.querySelector(".quarry-dl-info");
+    if (!panel.querySelector(".quarry-dl-bar")) {
+      showBatchProgress(status);
+      return;
+    }
+    const bar = panel.querySelector(".quarry-dl-bar");
+    const info = panel.querySelector(".quarry-dl-info");
+    const label = panel.querySelector(".quarry-dl-label");
     if (bar) {
       bar.style.width = `${progressPercent(status)}%`;
     }
     if (info) {
       info.textContent = renderProgressInfo(status);
+    }
+    if (label) {
+      label.textContent = progressLabel();
+    }
+  };
+  var hideBatchProgress = () => {
+    const panel = document.getElementById(PROGRESS_ID);
+    if (panel) {
+      panel.style.display = "none";
+      panel.innerHTML = "";
     }
   };
   var stopPolling = () => {
@@ -1253,32 +1329,6 @@
   };
   var scheduleNextPoll = () => {
     pollTimer = setTimeout(pollOnce, POLL_MS2);
-  };
-  var finishDownload = (status) => {
-    stopPolling();
-    const name = downloadingName;
-    downloadingName = null;
-    lastRunId = 0;
-    if (status.state === "done") {
-      const entry = currentList.find((d) => d.name === name);
-      if (entry) {
-        entry.installed = true;
-      }
-      renderList();
-      showMessage(`Downloaded ${name ?? "dataset"}.`, "success");
-      onChanged?.();
-    } else if (status.state === "error") {
-      renderList();
-      showMessage(
-        `Download failed: ${status.error ?? "unknown error"}`,
-        "error"
-      );
-    } else if (status.state === "cancelled") {
-      renderList();
-      showMessage("Download cancelled.", "info");
-    } else {
-      renderList();
-    }
   };
   var pollOnce = () => {
     pollTimer = null;
@@ -1291,14 +1341,12 @@
           return;
         }
         if (status.active) {
-          if (status.dataset) {
-            updateProgressUI(status.dataset, status);
-          }
+          updateBatchProgress(status);
           scheduleNextPoll();
           return;
         }
         if (lastRunId === 0 || status.id === lastRunId) {
-          finishDownload(status);
+          onItemFinished(status);
         } else {
           stopPolling();
         }
@@ -1310,57 +1358,135 @@
       pollOnce();
     }
   };
+  var onItemFinished = (status) => {
+    stopPolling();
+    const name = downloadingName;
+    downloadingName = null;
+    lastRunId = 0;
+    if (status.state === "done") {
+      const entry = currentList.find((d) => d.name === name);
+      if (entry) {
+        entry.installed = true;
+      }
+      completedCount++;
+    } else if (status.state === "error") {
+      failedNames.push(
+        `${name ?? "dataset"} (${status.error ?? "unknown error"})`
+      );
+    } else if (status.state === "cancelled") {
+      cancelledBatch = true;
+    }
+    queueIndex++;
+    startNext();
+  };
+  var startNext = () => {
+    if (cancelledBatch || queueIndex >= queue.length) {
+      finishBatch();
+      return;
+    }
+    const item = queue[queueIndex];
+    highlightActiveRow(item.name);
+    showBatchProgress({ success: true, state: "starting" });
+    genericRequest(
+      "QuarryDownloadDataset",
+      { dataset: item.name, redownload: item.redownload },
+      (data) => {
+        if (!data.success) {
+          failedNames.push(
+            `${item.name} (${data.error ?? "could not start"})`
+          );
+          queueIndex++;
+          startNext();
+          return;
+        }
+        downloadingName = item.name;
+        lastRunId = data.id ?? 0;
+        startPolling();
+      }
+    );
+  };
+  var finishBatch = () => {
+    stopPolling();
+    downloadingName = null;
+    lastRunId = 0;
+    hideBatchProgress();
+    highlightActiveRow(null);
+    renderList();
+    setControlsDownloading(false);
+    if (cancelledBatch) {
+      showMessage(
+        `Cancelled. Downloaded ${completedCount} of ${queueTotal}.`,
+        "info"
+      );
+    } else if (failedNames.length > 0) {
+      showMessage(
+        `Downloaded ${completedCount} of ${queueTotal}. Failed: ${failedNames.join(", ")}.`,
+        "error"
+      );
+    } else {
+      showMessage(
+        `Downloaded ${completedCount} dataset${completedCount === 1 ? "" : "s"}.`,
+        "success"
+      );
+    }
+    if (completedCount > 0) {
+      onChanged?.();
+    }
+  };
+  var startBatch = () => {
+    if (downloadingName) {
+      return;
+    }
+    const selected = selectedDatasets();
+    if (selected.length === 0) {
+      return;
+    }
+    queue = selected;
+    queueTotal = selected.length;
+    queueIndex = 0;
+    completedCount = 0;
+    failedNames = [];
+    cancelledBatch = false;
+    showMessage("");
+    setControlsDownloading(true);
+    startNext();
+  };
+  var cancelDownload = () => {
+    showMessage("Cancelling…", "info");
+    cancelledBatch = true;
+    genericRequest("QuarryCancelDownload", {}, () => {
+    });
+  };
   var resumeIfActive = () => {
     genericRequest(
       "QuarryDownloadStatus",
       {},
       (status) => {
         if (status.success && status.active && status.dataset) {
+          queue = [{ name: status.dataset, redownload: false }];
+          queueTotal = 1;
+          queueIndex = 0;
+          completedCount = 0;
+          failedNames = [];
+          cancelledBatch = false;
           downloadingName = status.dataset;
           lastRunId = status.id ?? 0;
-          markDownloadingUI(status.dataset);
-          updateProgressUI(status.dataset, status);
+          setControlsDownloading(true);
+          highlightActiveRow(status.dataset);
+          showBatchProgress(status);
           startPolling();
         }
       }
     );
   };
-  var startDownload = (name, redownload) => {
-    if (downloadingName) {
-      return;
-    }
-    showMessage("");
-    genericRequest(
-      "QuarryDownloadDataset",
-      { dataset: name, redownload },
-      (data) => {
-        if (!data.success) {
-          showMessage(
-            data.error ?? "Could not start the download.",
-            "error"
-          );
-          return;
-        }
-        downloadingName = name;
-        lastRunId = data.id ?? 0;
-        markDownloadingUI(name);
-        startPolling();
-      }
-    );
-  };
-  var cancelDownload = () => {
-    showMessage("Cancelling…", "info");
-    genericRequest("QuarryCancelDownload", {}, () => {
-    });
-  };
-  var loadAvailable = () => {
+  var loadAvailable = (force = false) => {
     const body2 = document.getElementById(BODY_ID);
     if (body2) {
       body2.innerHTML = `<div class="quarry-download-loading">Loading…</div>`;
     }
     genericRequest(
       "QuarryListAvailableDatasets",
-      {},
+      { refresh: force },
       (data) => {
         if (!data.success) {
           if (body2) {
@@ -1372,23 +1498,30 @@
         tokenSet = data.tokenSet ?? false;
         repoUrl = data.repoUrl ?? "";
         renderList();
-        resumeIfActive();
+        if (downloadingName) {
+          setControlsDownloading(true);
+          highlightActiveRow(downloadingName);
+        } else {
+          resumeIfActive();
+        }
       }
     );
   };
-  var bodyClickHandler = (event) => {
+  var bodyChangeHandler = (event) => {
     const target = event.target;
-    const downloadButton = target?.closest(
-      ".quarry-remote-download"
-    );
-    if (downloadButton) {
-      const name = downloadButton.getAttribute("data-dataset");
-      const redownload = downloadButton.getAttribute("data-redownload") === "true";
-      if (name) {
-        startDownload(name, redownload);
+    if (target?.classList.contains("quarry-remote-selectall")) {
+      const checked = target.checked;
+      for (const cb of rowCheckboxes()) {
+        cb.checked = checked;
       }
-      return;
     }
+    if (target?.classList.contains("quarry-remote-select") || target?.classList.contains("quarry-remote-selectall")) {
+      updateSelectAllState();
+      updateStartButtonState();
+    }
+  };
+  var progressClickHandler = (event) => {
+    const target = event.target;
     if (target?.closest(".quarry-remote-cancel")) {
       cancelDownload();
     }
@@ -1410,16 +1543,24 @@
                 </div>
                 <div class="modal-body">
                     <div id="${BODY_ID}" class="quarry-download-body"></div>
+                    <div id="${PROGRESS_ID}" class="quarry-download-progress" style="display: none;"></div>
                     <div id="${MESSAGE_ID}" class="quarry-download-message"></div>
                 </div>
-                <div class="modal-footer">
+                <div class="modal-footer quarry-download-footer">
+                    <div class="quarry-download-footer-actions">
+                        <button type="button" id="${START_ID}" class="btn btn-primary basic-button" disabled>Download</button>
+                        <button type="button" id="${REFRESH_ID}" class="btn btn-secondary basic-button">Refresh</button>
+                    </div>
                     <button type="button" class="btn btn-secondary basic-button" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
         </div>`;
     document.body.appendChild(modal);
     modal.querySelector('[data-bs-dismiss="modal"]')?.addEventListener("click", hideDownloadModal);
-    document.getElementById(BODY_ID)?.addEventListener("click", bodyClickHandler);
+    document.getElementById(START_ID)?.addEventListener("click", startBatch);
+    document.getElementById(REFRESH_ID)?.addEventListener("click", () => loadAvailable(true));
+    document.getElementById(BODY_ID)?.addEventListener("change", bodyChangeHandler);
+    document.getElementById(PROGRESS_ID)?.addEventListener("click", progressClickHandler);
   };
   var showDownloadModal = () => {
     if (typeof $ === "function") {

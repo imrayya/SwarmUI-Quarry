@@ -24,18 +24,18 @@ public static class DatasetDownloader
     private static DateTime _listCacheUtc;
     private static readonly TimeSpan ListTtl = TimeSpan.FromMinutes(5);
 
-    public static async Task<List<RemoteDataset>> ListAvailableAsync(string token)
+    public static async Task<List<RemoteDataset>> ListAvailableAsync(string token, bool forceRefresh = false)
     {
-        List<RemoteDataset> remote = await GetRemoteListAsync(token);
+        List<RemoteDataset> remote = await GetRemoteListAsync(token, forceRefresh);
         return [.. remote.Select(d => d with { Installed = IsInstalled(d.RepoPath) })];
     }
 
-    private static async Task<List<RemoteDataset>> GetRemoteListAsync(string token)
+    private static async Task<List<RemoteDataset>> GetRemoteListAsync(string token, bool forceRefresh)
     {
         await ListLock.WaitAsync(Program.GlobalProgramCancel);
         try
         {
-            if (_listCache is not null && DateTime.UtcNow - _listCacheUtc < ListTtl)
+            if (!forceRefresh && _listCache is not null && DateTime.UtcNow - _listCacheUtc < ListTtl)
             {
                 return _listCache;
             }
@@ -66,13 +66,8 @@ public static class DatasetDownloader
             {
                 continue;
             }
-            int slash = path.IndexOf('/');
-            if (slash <= 0)
-            {
-                continue;
-            }
-            string folder = path[..slash];
-            if (!folder.EndsWith(".lance", StringComparison.OrdinalIgnoreCase))
+            string folder = DatasetFolderOf(path);
+            if (folder is null)
             {
                 continue;
             }
@@ -88,6 +83,24 @@ public static class DatasetDownloader
         }
         result.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
         return result;
+    }
+
+    public static string DatasetFolderOf(string path)
+    {
+        string[] segments = path.Split('/');
+        for (int i = 0; i < segments.Length - 1; i++)
+        {
+            string segment = segments[i];
+            if (segment.Length == 0 || segment[0] == '.')
+            {
+                return null;
+            }
+            if (segment.EndsWith(".lance", StringComparison.OrdinalIgnoreCase))
+            {
+                return string.Join('/', segments[..(i + 1)]);
+            }
+        }
+        return null;
     }
 
     public static List<RemoteFile> ParseDatasetFiles(JArray tree, string repoPath)
@@ -272,8 +285,10 @@ public static class DatasetDownloader
     {
         string folder = DatasetManager.DatasetsFolder;
         string finalDir = Path.Combine(folder, target.RepoPath);
-        string tempDir = Path.Combine(folder, $".{target.RepoPath}.swarmdl-tmp");
-        string trashDir = Path.Combine(folder, $".{target.RepoPath}.swarmdl-old");
+        string parentDir = Path.GetDirectoryName(finalDir);
+        string leaf = Path.GetFileName(finalDir);
+        string tempDir = Path.Combine(parentDir, $".{leaf}.swarmdl-tmp");
+        string trashDir = Path.Combine(parentDir, $".{leaf}.swarmdl-old");
         try
         {
             if (!redownload && Directory.Exists(finalDir))
@@ -281,7 +296,7 @@ public static class DatasetDownloader
                 SetState(id, s => { s.State = "done"; s.BytesDone = s.BytesTotal; s.FilesDone = s.FilesTotal; });
                 return;
             }
-            Directory.CreateDirectory(folder);
+            Directory.CreateDirectory(parentDir);
             List<RemoteFile> files = await ListDatasetFilesAsync(target.RepoPath, token);
             if (files.Count == 0)
             {
