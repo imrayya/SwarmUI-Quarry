@@ -20,6 +20,33 @@
     const decimals = unit === 0 || value >= 100 ? 0 : 1;
     return `${value.toFixed(decimals)} ${units[unit]}`;
   };
+  var datasetFolder = (name) => {
+    const slash = name.lastIndexOf("/");
+    return slash > 0 ? name.slice(0, slash) : null;
+  };
+  var datasetLeafName = (name) => name.slice(name.lastIndexOf("/") + 1);
+  var groupByFolder = (items) => {
+    const loose = [];
+    const byFolder = /* @__PURE__ */ new Map();
+    for (const item of items) {
+      const folder = datasetFolder(item.name);
+      if (folder === null) {
+        loose.push(item);
+        continue;
+      }
+      const existing = byFolder.get(folder);
+      if (existing) {
+        existing.push(item);
+      } else {
+        byFolder.set(folder, [item]);
+      }
+    }
+    const groups = Array.from(byFolder, ([folder, grouped]) => ({
+      folder,
+      items: grouped
+    })).sort((a, b) => a.folder.localeCompare(b.folder));
+    return { loose, groups };
+  };
 
   // frontend/complete.ts
   var datasets = [];
@@ -1111,15 +1138,15 @@
     }
     return `https://huggingface.co/datasets/${top.slice(0, dot)}/${top.slice(dot + 1)}`;
   };
-  var renderRemoteDatasetName = (name) => {
-    const escaped = escapeHtml(name);
+  var renderRemoteDatasetName = (name, displayName = name) => {
+    const label = escapeHtml(displayName);
     const url = sourceRepoUrl(name);
     if (!url) {
-      return escaped;
+      return label;
     }
-    return `<a class="quarry-remote-link" href="${escapeHtml(url)}" target="_blank" rel="noreferrer noopener" title="Open ${escaped} on HuggingFace">${escaped}</a>`;
+    return `<a class="quarry-remote-link" href="${escapeHtml(url)}" target="_blank" rel="noreferrer noopener" title="Open ${escapeHtml(name)} on HuggingFace">${label}</a>`;
   };
-  var renderRemoteDatasetRow = (dataset) => {
+  var renderRemoteDatasetRow = (dataset, displayName = dataset.name) => {
     const name = escapeHtml(dataset.name);
     const installed = dataset.installed;
     const rowClass = installed ? "quarry-remote-row quarry-remote-installed" : "quarry-remote-row";
@@ -1129,21 +1156,45 @@
         <td class="quarry-remote-selcell">
             <input type="checkbox" class="quarry-remote-select" data-dataset="${name}" data-installed="${installed}" title="${title}" />
         </td>
-        <td class="quarry-remote-name">${check}${renderRemoteDatasetName(dataset.name)}</td>
+        <td class="quarry-remote-name">${check}${renderRemoteDatasetName(dataset.name, displayName)}</td>
         <td class="quarry-remote-size">${formatBytes(dataset.sizeBytes)}</td>
     </tr>`;
   };
-  var renderRemoteDatasets = (list) => {
+  var renderRemoteFolderGroup = (group, expanded) => {
+    const folder = escapeHtml(group.folder);
+    const collapsedClass = expanded ? "" : " quarry-collapsed";
+    const rows = group.items.map(
+      (dataset) => renderRemoteDatasetRow(dataset, datasetLeafName(dataset.name))
+    ).join("");
+    return `<tbody class="quarry-folder-group${collapsedClass}" data-folder="${folder}">
+        <tr class="quarry-folder-row">
+            <td colspan="3">
+                <button type="button" class="quarry-folder-toggle" data-folder="${folder}" aria-expanded="${expanded}" title="Show or hide the datasets in this folder">
+                    <span class="quarry-folder-caret" aria-hidden="true"></span>
+                    <span class="quarry-folder-name">${folder}</span>
+                    <span class="quarry-folder-count" title="${group.items.length} dataset(s)">${group.items.length}</span>
+                </button>
+            </td>
+        </tr>
+        ${rows}
+    </tbody>`;
+  };
+  var renderRemoteDatasets = (list, expandedFolders3 = /* @__PURE__ */ new Set()) => {
     if (!list || list.length === 0) {
       return `<div class="quarry-remote-empty">No datasets available right now.</div>`;
     }
+    const { loose, groups } = groupByFolder(list);
+    const groupBodies = groups.map(
+      (group) => renderRemoteFolderGroup(group, expandedFolders3.has(group.folder))
+    ).join("");
+    const looseBody = loose.length ? `<tbody>${loose.map((dataset) => renderRemoteDatasetRow(dataset)).join("")}</tbody>` : "";
     return `<table class="quarry-remote-table">
         <thead><tr>
             <th class="quarry-remote-selcell"><input type="checkbox" class="quarry-remote-selectall" title="Select all" /></th>
             <th>Dataset</th>
             <th>Size</th>
         </tr></thead>
-        <tbody>${list.map(renderRemoteDatasetRow).join("")}</tbody>
+        ${groupBodies}${looseBody}
     </table>`;
   };
   var progressPercent = (status) => {
@@ -1177,6 +1228,7 @@
   var currentList = [];
   var tokenSet = false;
   var repoUrl = "";
+  var expandedFolders = /* @__PURE__ */ new Set();
   var queue = [];
   var queueIndex = 0;
   var queueTotal = 0;
@@ -1194,7 +1246,7 @@
   var renderList = () => {
     const body2 = document.getElementById(BODY_ID);
     if (body2) {
-      body2.innerHTML = renderNote() + renderRemoteDatasets(currentList);
+      body2.innerHTML = renderNote() + renderRemoteDatasets(currentList, expandedFolders);
     }
     updateSelectAllState();
     updateStartButtonState();
@@ -1526,6 +1578,27 @@
       cancelDownload();
     }
   };
+  var toggleFolder = (toggle) => {
+    const folder = toggle.getAttribute("data-folder");
+    const group = toggle.closest(".quarry-folder-group");
+    if (!folder || !group) {
+      return;
+    }
+    const collapsed = group.classList.toggle("quarry-collapsed");
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    if (collapsed) {
+      expandedFolders.delete(folder);
+    } else {
+      expandedFolders.add(folder);
+    }
+  };
+  var bodyClickHandler = (event) => {
+    const target = event.target;
+    const folderToggle = target?.closest(".quarry-folder-toggle");
+    if (folderToggle) {
+      toggleFolder(folderToggle);
+    }
+  };
   var ensureDownloadModal = () => {
     if (document.getElementById(MODAL_ID)) {
       return;
@@ -1560,6 +1633,7 @@
     document.getElementById(START_ID)?.addEventListener("click", startBatch);
     document.getElementById(REFRESH_ID)?.addEventListener("click", () => loadAvailable(true));
     document.getElementById(BODY_ID)?.addEventListener("change", bodyChangeHandler);
+    document.getElementById(BODY_ID)?.addEventListener("click", bodyClickHandler);
     document.getElementById(PROGRESS_ID)?.addEventListener("click", progressClickHandler);
   };
   var showDownloadModal = () => {
@@ -1645,7 +1719,7 @@
   var PREVIEW_STATUS_ID = "quarry-preview-status";
   var PREVIEW_LOAD_MORE_ID = "quarry-preview-loadmore";
   var PREVIEW_CLEAR_ID = "quarry-preview-clear";
-  var expandedFolders = /* @__PURE__ */ new Set();
+  var expandedFolders2 = /* @__PURE__ */ new Set();
   var renderDatasetOptions = (dataset) => dataset.columns.map((col) => {
     const selected = col.name === dataset.resolvedPromptColumn ? " selected" : "";
     const badge = col.kind === "list" ? " [list]" : "";
@@ -1684,32 +1758,15 @@
         <td><button type="button" class="basic-button quarry-preview-button" data-dataset="${name}" title="Preview this dataset's rows (load more in the dialog)">Preview</button></td>
     </tr>`;
   };
-  var datasetFolder = (name) => {
-    const slash = name.lastIndexOf("/");
-    return slash > 0 ? name.slice(0, slash) : null;
-  };
-  var datasetLeafName = (name) => name.slice(name.lastIndexOf("/") + 1);
   var groupDatasetsByFolder = (datasets2) => {
-    const loose = [];
-    const byFolder = /* @__PURE__ */ new Map();
-    for (const dataset of datasets2) {
-      const folder = datasetFolder(dataset.name);
-      if (folder === null) {
-        loose.push(dataset);
-        continue;
-      }
-      const existing = byFolder.get(folder);
-      if (existing) {
-        existing.push(dataset);
-      } else {
-        byFolder.set(folder, [dataset]);
-      }
-    }
-    const groups = Array.from(byFolder, ([folder, ds]) => ({
-      folder,
-      datasets: ds
-    })).sort((a, b) => a.folder.localeCompare(b.folder));
-    return { loose, groups };
+    const { loose, groups } = groupByFolder(datasets2);
+    return {
+      loose,
+      groups: groups.map((group) => ({
+        folder: group.folder,
+        datasets: group.items
+      }))
+    };
   };
   var renderFolderGroup = (group, expanded) => {
     const folder = escapeHtml(group.folder);
@@ -1730,13 +1787,13 @@
         ${rows}
     </tbody>`;
   };
-  var renderDatasets = (datasets2, expandedFolders2 = /* @__PURE__ */ new Set()) => {
+  var renderDatasets = (datasets2, expandedFolders3 = /* @__PURE__ */ new Set()) => {
     if (!datasets2 || datasets2.length === 0) {
       return `<div class="quarry-datasets-empty">No datasets found. Set a folder containing CSV / JSON / JSONL / Parquet / Lance files, then Refresh.</div>`;
     }
     const { loose, groups } = groupDatasetsByFolder(datasets2);
     const groupBodies = groups.map(
-      (group) => renderFolderGroup(group, expandedFolders2.has(group.folder))
+      (group) => renderFolderGroup(group, expandedFolders3.has(group.folder))
     ).join("");
     const looseBody = loose.length ? `<tbody>${loose.map((dataset) => renderDatasetRow(dataset)).join("")}</tbody>` : "";
     return `<table class="quarry-datasets-table">
@@ -1873,7 +1930,7 @@
     if (datasetsEl) {
       datasetsEl.innerHTML = renderDatasets(
         data.datasets ?? [],
-        expandedFolders
+        expandedFolders2
       );
       recomputeReferences();
     }
@@ -2141,7 +2198,7 @@
       }
     );
   };
-  var toggleFolder = (toggle) => {
+  var toggleFolder2 = (toggle) => {
     const folder = toggle.getAttribute("data-folder");
     const group = toggle.closest(".quarry-folder-group");
     if (!folder || !group) {
@@ -2150,16 +2207,16 @@
     const collapsed = group.classList.toggle("quarry-collapsed");
     toggle.setAttribute("aria-expanded", String(!collapsed));
     if (collapsed) {
-      expandedFolders.delete(folder);
+      expandedFolders2.delete(folder);
     } else {
-      expandedFolders.add(folder);
+      expandedFolders2.add(folder);
     }
   };
   var datasetsClickHandler = (event) => {
     const target = event.target;
     const folderToggle = target?.closest(".quarry-folder-toggle");
     if (folderToggle) {
-      toggleFolder(folderToggle);
+      toggleFolder2(folderToggle);
       return;
     }
     const previewButton = target?.closest(

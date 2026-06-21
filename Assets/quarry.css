@@ -181,13 +181,13 @@
     padding: 0 0.45rem;
 }
 
-/* Collapsing simply hides the group's dataset rows; the header row stays. */
-.quarry-folder-group.quarry-collapsed .quarry-dataset-row {
+.quarry-folder-group.quarry-collapsed .quarry-dataset-row,
+.quarry-folder-group.quarry-collapsed .quarry-remote-row {
     display: none;
 }
 
-/* Indent datasets nested under a folder so the hierarchy reads at a glance. */
-.quarry-folder-group .quarry-dataset-row > td:first-child {
+.quarry-folder-group .quarry-dataset-row > td:first-child,
+.quarry-folder-group .quarry-remote-row > td:first-child {
     padding-left: 1.75rem;
 }
 

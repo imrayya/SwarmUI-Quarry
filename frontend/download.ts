@@ -4,7 +4,13 @@ import type {
     RemoteDatasetDto,
     StartDownloadResponse,
 } from "./types";
-import { escapeHtml, formatBytes } from "./util";
+import {
+    datasetLeafName,
+    escapeHtml,
+    formatBytes,
+    groupByFolder,
+    type NameFolderGroup,
+} from "./util";
 
 const MODAL_ID = "quarry-download-modal";
 const BODY_ID = "quarry-download-body";
@@ -23,16 +29,22 @@ export const sourceRepoUrl = (name: string): string | null => {
     return `https://huggingface.co/datasets/${top.slice(0, dot)}/${top.slice(dot + 1)}`;
 };
 
-export const renderRemoteDatasetName = (name: string): string => {
-    const escaped = escapeHtml(name);
+export const renderRemoteDatasetName = (
+    name: string,
+    displayName: string = name,
+): string => {
+    const label = escapeHtml(displayName);
     const url = sourceRepoUrl(name);
     if (!url) {
-        return escaped;
+        return label;
     }
-    return `<a class="quarry-remote-link" href="${escapeHtml(url)}" target="_blank" rel="noreferrer noopener" title="Open ${escaped} on HuggingFace">${escaped}</a>`;
+    return `<a class="quarry-remote-link" href="${escapeHtml(url)}" target="_blank" rel="noreferrer noopener" title="Open ${escapeHtml(name)} on HuggingFace">${label}</a>`;
 };
 
-export const renderRemoteDatasetRow = (dataset: RemoteDatasetDto): string => {
+export const renderRemoteDatasetRow = (
+    dataset: RemoteDatasetDto,
+    displayName: string = dataset.name,
+): string => {
     const name = escapeHtml(dataset.name);
     const installed = dataset.installed;
     const rowClass = installed
@@ -48,22 +60,59 @@ export const renderRemoteDatasetRow = (dataset: RemoteDatasetDto): string => {
         <td class="quarry-remote-selcell">
             <input type="checkbox" class="quarry-remote-select" data-dataset="${name}" data-installed="${installed}" title="${title}" />
         </td>
-        <td class="quarry-remote-name">${check}${renderRemoteDatasetName(dataset.name)}</td>
+        <td class="quarry-remote-name">${check}${renderRemoteDatasetName(dataset.name, displayName)}</td>
         <td class="quarry-remote-size">${formatBytes(dataset.sizeBytes)}</td>
     </tr>`;
 };
 
-export const renderRemoteDatasets = (list: RemoteDatasetDto[]): string => {
+export const renderRemoteFolderGroup = (
+    group: NameFolderGroup<RemoteDatasetDto>,
+    expanded: boolean,
+): string => {
+    const folder = escapeHtml(group.folder);
+    const collapsedClass = expanded ? "" : " quarry-collapsed";
+    const rows = group.items
+        .map((dataset) =>
+            renderRemoteDatasetRow(dataset, datasetLeafName(dataset.name)),
+        )
+        .join("");
+    return `<tbody class="quarry-folder-group${collapsedClass}" data-folder="${folder}">
+        <tr class="quarry-folder-row">
+            <td colspan="3">
+                <button type="button" class="quarry-folder-toggle" data-folder="${folder}" aria-expanded="${expanded}" title="Show or hide the datasets in this folder">
+                    <span class="quarry-folder-caret" aria-hidden="true"></span>
+                    <span class="quarry-folder-name">${folder}</span>
+                    <span class="quarry-folder-count" title="${group.items.length} dataset(s)">${group.items.length}</span>
+                </button>
+            </td>
+        </tr>
+        ${rows}
+    </tbody>`;
+};
+
+export const renderRemoteDatasets = (
+    list: RemoteDatasetDto[],
+    expandedFolders: ReadonlySet<string> = new Set<string>(),
+): string => {
     if (!list || list.length === 0) {
         return `<div class="quarry-remote-empty">No datasets available right now.</div>`;
     }
+    const { loose, groups } = groupByFolder(list);
+    const groupBodies = groups
+        .map((group) =>
+            renderRemoteFolderGroup(group, expandedFolders.has(group.folder)),
+        )
+        .join("");
+    const looseBody = loose.length
+        ? `<tbody>${loose.map((dataset) => renderRemoteDatasetRow(dataset)).join("")}</tbody>`
+        : "";
     return `<table class="quarry-remote-table">
         <thead><tr>
             <th class="quarry-remote-selcell"><input type="checkbox" class="quarry-remote-selectall" title="Select all" /></th>
             <th>Dataset</th>
             <th>Size</th>
         </tr></thead>
-        <tbody>${list.map(renderRemoteDatasetRow).join("")}</tbody>
+        ${groupBodies}${looseBody}
     </table>`;
 };
 
@@ -105,6 +154,7 @@ let onChanged: (() => void) | null = null;
 let currentList: RemoteDatasetDto[] = [];
 let tokenSet = false;
 let repoUrl = "";
+const expandedFolders = new Set<string>();
 let queue: QueueItem[] = [];
 let queueIndex = 0;
 let queueTotal = 0;
@@ -128,7 +178,8 @@ const renderNote = (): string => {
 const renderList = (): void => {
     const body = document.getElementById(BODY_ID);
     if (body) {
-        body.innerHTML = renderNote() + renderRemoteDatasets(currentList);
+        body.innerHTML =
+            renderNote() + renderRemoteDatasets(currentList, expandedFolders);
     }
     updateSelectAllState();
     updateStartButtonState();
@@ -504,6 +555,29 @@ const progressClickHandler = (event: Event): void => {
     }
 };
 
+const toggleFolder = (toggle: HTMLElement): void => {
+    const folder = toggle.getAttribute("data-folder");
+    const group = toggle.closest<HTMLElement>(".quarry-folder-group");
+    if (!folder || !group) {
+        return;
+    }
+    const collapsed = group.classList.toggle("quarry-collapsed");
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    if (collapsed) {
+        expandedFolders.delete(folder);
+    } else {
+        expandedFolders.add(folder);
+    }
+};
+
+const bodyClickHandler = (event: Event): void => {
+    const target = event.target as HTMLElement | null;
+    const folderToggle = target?.closest<HTMLElement>(".quarry-folder-toggle");
+    if (folderToggle) {
+        toggleFolder(folderToggle);
+    }
+};
+
 const ensureDownloadModal = (): void => {
     if (document.getElementById(MODAL_ID)) {
         return;
@@ -544,6 +618,9 @@ const ensureDownloadModal = (): void => {
     document
         .getElementById(BODY_ID)
         ?.addEventListener("change", bodyChangeHandler);
+    document
+        .getElementById(BODY_ID)
+        ?.addEventListener("click", bodyClickHandler);
     document
         .getElementById(PROGRESS_ID)
         ?.addEventListener("click", progressClickHandler);

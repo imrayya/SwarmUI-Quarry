@@ -14,11 +14,17 @@ import type {
     PreviewResponse,
     SettingsResponse,
 } from "./types";
-import { escapeHtml } from "./util";
+import {
+    datasetFolder,
+    datasetLeafName,
+    escapeHtml,
+    groupByFolder,
+} from "./util";
+
+export { datasetFolder, datasetLeafName };
 
 const MESSAGE_TIMEOUT_MS = 5000;
 export const PREVIEW_ROW_LIMIT = 100;
-// How many extra rows each "Load more" click pulls (and caches) in the preview modal.
 export const PREVIEW_LOAD_MORE_COUNT = 500;
 const ADD_TO_EXISTING_TAG_ID = "quarry-add-to-existing-tag";
 const PREVIEW_MODAL_ID = "quarry-preview-modal";
@@ -28,8 +34,6 @@ const PREVIEW_STATUS_ID = "quarry-preview-status";
 const PREVIEW_LOAD_MORE_ID = "quarry-preview-loadmore";
 const PREVIEW_CLEAR_ID = "quarry-preview-clear";
 
-// Folders the user has manually expanded this session, by folder name. Empty = all collapsed (the default),
-// so groups start collapsed; expansions survive table re-renders (Save/Refresh) instead of snapping shut.
 const expandedFolders = new Set<string>();
 
 export const renderDatasetOptions = (dataset: DatasetDto): string =>
@@ -58,7 +62,6 @@ export const renderTagCheckboxes = (dataset: DatasetDto): string =>
 export const formatRowCount = (count: number | null | undefined): string =>
     count == null ? "—" : count.toLocaleString();
 
-/// Toggles the "in prompt" highlight on each dataset row whose name (case-insensitive) is in `names`.
 export const applyInPromptHighlights = (
     container: HTMLElement,
     names: string[],
@@ -72,18 +75,12 @@ export const applyInPromptHighlights = (
         });
 };
 
-/// The dataset name rendered as a clickable control. Clicking it inserts (or toggles off) a `<q:NAME>`
-/// reference in the prompt — the same behavior the old browser-tab cards had. `name` (the full dataset key
-/// used everywhere as the identity) and `label` (the visible text) are both already HTML-escaped. `label`
-/// defaults to `name`; folder-grouped rows pass the short leaf name while keeping the full `name` as identity.
 export const renderDatasetNameButton = (
     name: string,
     label: string = name,
 ): string =>
     `<button type="button" class="quarry-dataset-name quarry-dataset-name-link" data-dataset="${name}" title="Add a reference to this dataset to your prompt">${label}</button>`;
 
-/// Renders one dataset's `<tr>`. `displayName` is the visible name text (defaults to the full dataset name);
-/// rows nested under a folder group pass the short leaf name, while `data-dataset` always keeps the full name.
 export const renderDatasetRow = (
     dataset: DatasetDto,
     displayName: string = dataset.name,
@@ -105,52 +102,24 @@ export const renderDatasetRow = (
     </tr>`;
 };
 
-/// The folder a dataset lives in (everything before the last `/` in its name), or null when it sits at the
-/// top level. Dataset names mirror their on-disk relative path, so `anime/1girl` lives in folder `anime`.
-export const datasetFolder = (name: string): string | null => {
-    const slash = name.lastIndexOf("/");
-    return slash > 0 ? name.slice(0, slash) : null;
-};
-
-/// The short, leaf portion of a dataset name (after the last `/`) — what we show inside a folder group.
-export const datasetLeafName = (name: string): string =>
-    name.slice(name.lastIndexOf("/") + 1);
-
 export interface DatasetFolderGroup {
     folder: string;
     datasets: DatasetDto[];
 }
 
-/// Splits datasets into top-level ("loose") ones and per-folder groups. Folders are sorted alphabetically;
-/// datasets keep their original order within each. A flat list (no `/` in any name) yields no groups.
 export const groupDatasetsByFolder = (
     datasets: DatasetDto[],
 ): { loose: DatasetDto[]; groups: DatasetFolderGroup[] } => {
-    const loose: DatasetDto[] = [];
-    const byFolder = new Map<string, DatasetDto[]>();
-    for (const dataset of datasets) {
-        const folder = datasetFolder(dataset.name);
-        if (folder === null) {
-            loose.push(dataset);
-            continue;
-        }
-        const existing = byFolder.get(folder);
-        if (existing) {
-            existing.push(dataset);
-        } else {
-            byFolder.set(folder, [dataset]);
-        }
-    }
-    const groups = Array.from(byFolder, ([folder, ds]) => ({
-        folder,
-        datasets: ds,
-    })).sort((a, b) => a.folder.localeCompare(b.folder));
-    return { loose, groups };
+    const { loose, groups } = groupByFolder(datasets);
+    return {
+        loose,
+        groups: groups.map((group) => ({
+            folder: group.folder,
+            datasets: group.items,
+        })),
+    };
 };
 
-/// One folder rendered as its own `<tbody>`: a clickable header row (caret + name + dataset count) followed by
-/// its dataset rows. Collapsing toggles the `quarry-collapsed` class on this `<tbody>`, which CSS uses to hide
-/// the member rows — the header stays put. Groups render collapsed unless `expanded` is true.
 export const renderFolderGroup = (
     group: DatasetFolderGroup,
     expanded: boolean,
@@ -176,9 +145,6 @@ export const renderFolderGroup = (
     </tbody>`;
 };
 
-/// Renders the datasets table. Datasets sharing a folder (a `/` in their name) are grouped under a collapsible
-/// folder header; folders sit above the top-level datasets. `expandedFolders` names the folders to render
-/// expanded — everything else (the default) renders collapsed.
 export const renderDatasets = (
     datasets: DatasetDto[],
     expandedFolders: ReadonlySet<string> = new Set<string>(),
@@ -231,8 +197,6 @@ export const renderPreviewTable = (
     </table>`;
 };
 
-/// The preview modal's footer status line, e.g. `Showing 600 of 1,234 row(s).`, dropping the total when the
-/// row count couldn't be determined.
 export const renderPreviewStatus = (
     shown: number,
     total: number | null | undefined,
@@ -274,8 +238,6 @@ export const renderForm = (folder: string): string => `
         </form>
     </div>`;
 
-/// The "install requirements" gate, shown instead of the panel until the DuckDB lance extension is installed.
-/// A one-time download; the button triggers it and the status line reports progress/result.
 export const renderInstallGate = (): string => `
     <div class="quarry-settings quarry-install-gate">
         <div class="input-group input-group-open">
@@ -320,8 +282,6 @@ export const collectTagColumns = (
         if (!name) {
             return;
         }
-        // Every dataset with at least one column gets an entry (even if nothing is checked) so that
-        // clearing all of its tag columns is persisted as an empty list.
         if (!(name in result)) {
             result[name] = [];
         }
@@ -334,7 +294,6 @@ export const collectTagColumns = (
 
 let messageTimer: ReturnType<typeof setTimeout> | null = null;
 
-// Flags the dataset rows referenced by the current prompt; driven by the shared prompt watcher (prompt.ts).
 const applyTableHighlights = (names: string[]): void => {
     const container = document.getElementById("quarry-datasets");
     if (container) {
@@ -356,9 +315,7 @@ const applyResponse = (data: SettingsResponse): void => {
     if (addToExistingEl) {
         addToExistingEl.checked = addToExisting;
     }
-    // Keep the click-behavior preference (read by insertQuarryTag) in sync with the saved value.
     setAddToExistingTag(addToExisting);
-    // Keep the `<q:...>` autocompleter's dataset list current, independent of whether the table is in the DOM.
     setCompletionDatasets(data.datasets);
     const datasetsEl = document.getElementById("quarry-datasets");
     if (datasetsEl) {
@@ -366,7 +323,6 @@ const applyResponse = (data: SettingsResponse): void => {
             data.datasets ?? [],
             expandedFolders,
         );
-        // The table was just rebuilt (highlight classes wiped) — recompute against the current prompt.
         recomputeReferences();
     }
 };
@@ -393,7 +349,6 @@ const loadSettings = (): void => {
         if (!data.success) {
             return;
         }
-        // Until the lance requirement is installed, show only the install gate — the panel can't read datasets.
         if (data.requirementsInstalled === false) {
             showInstallGate();
             return;
@@ -458,8 +413,6 @@ const refresh = (): void => {
     });
 };
 
-/// Deletes the leftover placeholder `.txt` files an older Quarry version mirrored into SwarmUI's Wildcards
-/// folder. Safe to run anytime: the backend only removes its own tiny sentinel files, never real wildcards.
 const cleanTempFiles = (): void => {
     const button = document.getElementById(
         "quarry-clean-temp",
@@ -488,9 +441,6 @@ const cleanTempFiles = (): void => {
     });
 };
 
-// --- Preview modal state ---
-// The dataset whose preview is open, how many rows are currently shown, the dataset's total row count (null
-// when unknown), whether every available row is loaded, and whether a request is in flight.
 let previewDataset: string | null = null;
 let previewShown = 0;
 let previewTotal: number | null = null;
@@ -549,8 +499,6 @@ const hidePreviewModal = (): void => {
     }
 };
 
-/// Fills in the lazily-loaded row count for a dataset wherever it is shown (the settings table's "Rows"
-/// cell). The count arrives with the preview response, so this runs once the user has previewed the dataset.
 const applyRowCount = (dataset: string, count: number | null): void => {
     const selector = `td.quarry-dataset-rows[data-dataset="${dataset.replace(/(["\\])/g, "\\$1")}"]`;
     for (const cell of Array.from(
@@ -560,7 +508,6 @@ const applyRowCount = (dataset: string, count: number | null): void => {
     }
 };
 
-// Enables/disables the footer buttons and updates the status line from the current preview state.
 const updatePreviewControls = (): void => {
     const loadMore = document.getElementById(
         PREVIEW_LOAD_MORE_ID,
@@ -582,9 +529,6 @@ const updatePreviewControls = (): void => {
     }
 };
 
-// Loads up to `limit` rows for `dataset` and renders them. The backend serves whatever it has cached when that
-// already covers the request, so this both opens a preview and grows it via "Load more". `isLoadMore` only
-// affects failure handling: a failed grow keeps the rows already on screen.
 const fetchPreview = (
     dataset: string,
     limit: number,
@@ -597,7 +541,6 @@ const fetchPreview = (
         { dataset, limit },
         (data) => {
             previewBusy = false;
-            // A stale response for a dataset the user has since navigated away from — ignore it.
             if (previewDataset !== dataset) {
                 return;
             }
@@ -613,7 +556,6 @@ const fetchPreview = (
             const rows = data.rows ?? [];
             previewShown = rows.length;
             previewTotal = data.rowCount ?? null;
-            // The end is reached when fewer rows came back than asked for, or we already hold every counted row.
             previewExhausted =
                 rows.length < limit ||
                 (previewTotal !== null && previewShown >= previewTotal);
@@ -644,7 +586,6 @@ export const openPreview = (dataset: string): void => {
     fetchPreview(dataset, PREVIEW_ROW_LIMIT, false);
 };
 
-// Pulls the next page of rows (the current count plus PREVIEW_LOAD_MORE_COUNT) into the preview, caching them.
 const loadMorePreview = (): void => {
     if (!previewDataset || previewBusy || previewExhausted) {
         return;
@@ -652,7 +593,6 @@ const loadMorePreview = (): void => {
     fetchPreview(previewDataset, previewShown + PREVIEW_LOAD_MORE_COUNT, true);
 };
 
-// Drops the open dataset's cached preview on the backend, then reloads the default first page fresh.
 const clearPreviewCache = (): void => {
     const dataset = previewDataset;
     if (!dataset || previewBusy) {
@@ -683,9 +623,6 @@ const clearPreviewCache = (): void => {
     );
 };
 
-/// Collapses or expands a folder group from its clicked header button: flips the `quarry-collapsed` class on
-/// the group's `<tbody>` (CSS hides/shows the member rows), updates `aria-expanded`, and records the new state
-/// in `expandedFolders` so a later table re-render keeps it.
 const toggleFolder = (toggle: HTMLElement): void => {
     const folder = toggle.getAttribute("data-folder");
     const group = toggle.closest<HTMLElement>(".quarry-folder-group");
@@ -701,9 +638,6 @@ const toggleFolder = (toggle: HTMLElement): void => {
     }
 };
 
-/// Click delegation for the datasets table: a folder header toggles its group open/closed; a preview button
-/// opens the preview modal; a dataset-name link drops a `<q:NAME>` reference into the prompt (or toggles it off
-/// if the dataset is already referenced) — the row's in-prompt highlight then follows via onReferences.
 const datasetsClickHandler = (event: Event): void => {
     const target = event.target as HTMLElement | null;
     const folderToggle = target?.closest<HTMLElement>(".quarry-folder-toggle");
@@ -721,8 +655,6 @@ const datasetsClickHandler = (event: Event): void => {
         }
         return;
     }
-    // The whole name cell is the click target (not just the inner button), so any click in the cell — padding
-    // and indent included — inserts the reference. The button inside still carries the dataset identity.
     const nameCell = target?.closest<HTMLElement>(".quarry-dataset-name-cell");
     if (nameCell) {
         const dataset = nameCell
@@ -734,8 +666,6 @@ const datasetsClickHandler = (event: Event): void => {
     }
 };
 
-/// Renders the settings form into the tab body and wires its controls — once. A no-op when the form is already
-/// present, so a settings reload updates values in place instead of rebuilding the form (and losing focus).
 const ensureFormRendered = (): void => {
     if (document.getElementById("quarry-form")) {
         return;
@@ -759,12 +689,10 @@ const ensureFormRendered = (): void => {
         ?.addEventListener("click", cleanTempFiles);
     document
         .getElementById("quarry-download-datasets")
-        // Reload settings after the modal closes so freshly-downloaded datasets appear in the table.
         ?.addEventListener("click", () => openDownloadModal(loadSettings));
     document
         .getElementById("quarry-datasets")
         ?.addEventListener("click", datasetsClickHandler);
-    // Apply the preference immediately on toggle (saved server-side only when Save Settings is clicked).
     document
         .getElementById(ADD_TO_EXISTING_TAG_ID)
         ?.addEventListener("change", (event) => {
@@ -772,8 +700,6 @@ const ensureFormRendered = (): void => {
         });
 };
 
-/// Triggers the one-time backend install of the DuckDB lance extension, then reloads settings — which swaps
-/// the gate for the real panel once the requirement is satisfied.
 const installRequirements = (): void => {
     const button = document.getElementById(
         "quarry-install",
@@ -803,8 +729,6 @@ const installRequirements = (): void => {
     });
 };
 
-/// Replaces the panel with the install-requirements gate and wires its button — once. A no-op when the gate is
-/// already shown, so a re-check can't clobber an in-progress install's status text.
 const showInstallGate = (): void => {
     if (document.getElementById("quarry-install")) {
         return;
@@ -820,18 +744,12 @@ const showInstallGate = (): void => {
 };
 
 const init = (): void => {
-    // The Quarry panel lives in the bottom-bar Quarry tab (injected by tab.ts before this runs). Render a
-    // placeholder, then loadSettings() fills in either the install gate or the real form, depending on whether
-    // the lance requirement is satisfied.
     const host = document.getElementById(QUARRY_TAB_BODY_ID);
     if (!host) {
         return;
     }
     host.innerHTML = `<div class="quarry-loading">Loading…</div>`;
     loadSettings();
-    // Keep the table's "in prompt" flags in sync with the shared prompt watcher (started in main.ts). The
-    // prompt textareas live on the generate tab but persist in the DOM, so the table stays current even while
-    // the Quarry settings panel is hidden. Registered once; applyTableHighlights no-ops until the table exists.
     onReferences(applyTableHighlights);
 };
 

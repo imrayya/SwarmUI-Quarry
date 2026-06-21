@@ -5,9 +5,19 @@ import {
     renderRemoteDatasetName,
     renderRemoteDatasetRow,
     renderRemoteDatasets,
+    renderRemoteFolderGroup,
     sourceRepoUrl,
 } from "./download";
+import type { RemoteDatasetDto } from "./types";
 import { formatBytes } from "./util";
+
+const makeRemote = (name: string, installed = false): RemoteDatasetDto => ({
+    name,
+    repoPath: `${name}.lance`,
+    sizeBytes: 100,
+    fileCount: 1,
+    installed,
+});
 
 describe("renderRemoteDatasetRow", () => {
     it("renders a not-installed dataset with an unchecked selection checkbox", () => {
@@ -91,6 +101,69 @@ describe("renderRemoteDatasets", () => {
         expect(html).toContain("quarry-remote-table");
         expect(html).toContain('data-dataset="a"');
         expect(html).toContain('data-dataset="b"');
+    });
+
+    it("groups nested datasets under a collapsible folder header (collapsed by default)", () => {
+        const html = renderRemoteDatasets([
+            makeRemote("loose"),
+            makeRemote("X779.Danbooruwildcards/DTR2024_1boy"),
+            makeRemote("X779.Danbooruwildcards/DTR2024_1girl"),
+        ]);
+        // A collapsible folder group, collapsed by default, with a 3-column-wide header and a count of 2.
+        expect(html).toContain('class="quarry-folder-group quarry-collapsed"');
+        expect(html).toContain('data-folder="X779.Danbooruwildcards"');
+        expect(html).toContain("quarry-folder-toggle");
+        expect(html).toContain('aria-expanded="false"');
+        expect(html).toContain('colspan="3"');
+        // Member rows keep the full name in data-dataset but display only the leaf.
+        expect(html).toContain(
+            'data-dataset="X779.Danbooruwildcards/DTR2024_1boy"',
+        );
+        expect(html).toContain(">DTR2024_1boy</a>");
+        expect(html).not.toContain(">X779.Danbooruwildcards/DTR2024_1boy</a>");
+        // The top-level dataset stays loose (not wrapped in a folder group's name link).
+        expect(html).toContain('data-dataset="loose"');
+    });
+
+    it("renders a folder expanded when it is named in the expanded set", () => {
+        const html = renderRemoteDatasets(
+            [makeRemote("anime/1girl")],
+            new Set(["anime"]),
+        );
+        expect(html).toContain('class="quarry-folder-group"');
+        expect(html).not.toContain("quarry-collapsed");
+        expect(html).toContain('aria-expanded="true"');
+    });
+});
+
+describe("renderRemoteFolderGroup", () => {
+    it("renders a tbody with a header and one leaf-named row per dataset", () => {
+        const html = renderRemoteFolderGroup(
+            {
+                folder: "anime",
+                items: [makeRemote("anime/1girl"), makeRemote("anime/2girls")],
+            },
+            true,
+        );
+        expect(html).toContain("<tbody");
+        expect(html).toContain('class="quarry-folder-group"');
+        expect(html).toContain('colspan="3"');
+        expect(html).toContain('aria-expanded="true"');
+        expect(html).toContain('data-dataset="anime/1girl"');
+        // Rows show only the leaf name. ("anime" has no dot, so the leaf is plain text, not a source link.)
+        expect(html).toContain(">1girl<");
+        expect(html).toContain(">2girls<");
+        expect(html).not.toContain(">anime/1girl<");
+        expect(html).toContain('title="2 dataset(s)"');
+    });
+
+    it("marks the group collapsed when not expanded", () => {
+        const html = renderRemoteFolderGroup(
+            { folder: "anime", items: [makeRemote("anime/x")] },
+            false,
+        );
+        expect(html).toContain("quarry-collapsed");
+        expect(html).toContain('aria-expanded="false"');
     });
 });
 
