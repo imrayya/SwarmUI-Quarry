@@ -8,4 +8,5 @@ dependencies = [
     "duckdb>=1.5.3",
     "pip>=26.1.2",
     "pylance>=7.0.0",
+    "visidata>=3.3",
 ]

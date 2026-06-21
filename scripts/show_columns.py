@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["duckdb>=1.0"]
+# dependencies = ["duckdb>=1.0", "pylance"]
 # ///
 """Print the column names of a data file as a single comma-delimited line.
 
-Supports Parquet, CSV/TSV, JSONL/NDJSON, and JSON (array or records). The format
-is inferred from the extension; override it with ``--format`` for odd names.
+Supports Parquet, CSV/TSV, JSONL/NDJSON, JSON (array or records), and Lance
+datasets (a ``*.lance`` directory). The format is inferred from the extension;
+override it with ``--format`` for odd names.
 
 Output is just the names, e.g. ``id,name,score,ok`` -- no types, one line.
 
 Usage:
     python show_columns.py <file>
     python show_columns.py data.parquet
+    python show_columns.py prompts.lance
     python show_columns.py weird_name --format csv
 
 Run it with the project venv:
@@ -38,9 +40,10 @@ _EXT_FORMAT = {
     ".jsonl": "jsonl",
     ".ndjson": "jsonl",
     ".json": "json",
+    ".lance": "lance",  # a Lance dataset directory
 }
 
-_FORMATS = ("parquet", "csv", "jsonl", "json")
+_FORMATS = ("parquet", "csv", "jsonl", "json", "lance")
 
 
 def detect_format(path: Path, override: str | None) -> str:
@@ -92,10 +95,25 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     path = Path(args.file)
+    fmt = detect_format(path, args.format)
+
+    # A Lance dataset is a directory, not a file, and is read with pylance rather
+    # than a DuckDB reader -- mirroring lance_clean.py, the repo's other Lance tool.
+    if fmt == "lance":
+        if not path.is_dir():
+            raise SystemExit(f"error: no such Lance dataset: {path}")
+        import lance  # imported lazily so non-Lance use needs no pylance
+
+        try:
+            names = list(lance.dataset(str(path)).schema.names)
+        except Exception as exc:  # corrupt / incomplete / not a Lance dataset
+            raise SystemExit(f"error: could not read {path} as lance: {exc}")
+        print(",".join(names))
+        return 0
+
     if not path.is_file():
         raise SystemExit(f"error: no such file: {path}")
 
-    fmt = detect_format(path, args.format)
     reader = reader_sql(fmt, quote_literal(str(path)))
 
     con = duckdb.connect()

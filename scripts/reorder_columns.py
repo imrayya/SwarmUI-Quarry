@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["duckdb>=1.0"]
+# dependencies = ["duckdb>=1.0", "pylance"]
 # ///
-"""Move named columns to the front of Parquet/CSV/JSONL file(s) in place.
+"""Move named columns to the front of Parquet/CSV/JSONL/Lance file(s) in place.
 
 Given a file and a comma-separated column order, the named columns are placed --
 in exactly the order given -- at the *front* of the file; every other column
@@ -12,18 +12,19 @@ keeps its existing relative order behind them. For a file with columns
 ``prompt,foo,id,bar,baz``.
 
 The ``file`` argument may be a single path or a shell-style wildcard pattern
-(``*``, ``?``, ``[...]``, ``**``). Each matching file is read, its columns are
-reordered, and the result is written back to the *same path* in the *same
-format*. Writing goes to a temporary file in the same directory first, then
-atomically replaces the original, so an error mid-write leaves the file
-untouched. A file already in the requested order is left untouched. Files are
-processed concurrently (16 at a time by default, see ``-w``) and independently:
-a failure on one (e.g. a column it doesn't have) is reported and the rest still
-run.
+(``*``, ``?``, ``[...]``, ``**``). A Lance dataset is a ``*.lance`` *directory*
+and is matched too. Each match is read, its columns are reordered, and the
+result is written back to the *same path* in the *same format*. Writing goes to
+a temporary file/dataset in the same directory first, then atomically replaces
+the original, so an error mid-write leaves the original untouched. A file already
+in the requested order is left untouched. Files are processed concurrently (16 at
+a time by default, see ``-w``) and independently: a failure on one (e.g. a column
+it doesn't have) is reported and the rest still run.
 
 Quote the pattern so the shell passes it through for this script to expand:
 
     python reorder_columns.py data.parquet prompt,foo         # a single file
+    python reorder_columns.py prompts.lance prompt,foo        # a Lance dataset
     python reorder_columns.py '000*.parquet' prompt,foo       # all 000*.parquet
     python reorder_columns.py 'shards/*.jsonl' text --format jsonl
     python reorder_columns.py '*.parquet' prompt -w 8         # 8 files at a time
@@ -40,6 +41,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import shutil
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -53,13 +55,19 @@ _EXT_FORMAT = {
     ".csv": "csv",
     ".jsonl": "jsonl",
     ".ndjson": "jsonl",
+    ".lance": "lance",  # a Lance dataset directory
 }
 
+# DuckDB readers, keyed by format. Lance is absent on purpose: it is read/written
+# with pylance, not a DuckDB reader (see process_lance_file).
 _READERS = {
     "parquet": "read_parquet",
     "csv": "read_csv_auto",
     "jsonl": "read_json",
 }
+
+# All formats accepted for --format (a superset of _READERS by the Lance entry).
+_FORMATS = (*_READERS, "lance")
 
 
 class FileError(Exception):
@@ -67,20 +75,20 @@ class FileError(Exception):
 
 
 def detect_format(path: Path, override: str | None) -> str:
-    """Return the logical format ('parquet' | 'csv' | 'jsonl')."""
+    """Return the logical format ('parquet' | 'csv' | 'jsonl' | 'lance')."""
     if override:
         fmt = override.lower()
-        if fmt not in _READERS:
+        if fmt not in _FORMATS:
             raise SystemExit(
                 f"error: unknown --format {override!r} "
-                f"(choose from: {', '.join(sorted(_READERS))})"
+                f"(choose from: {', '.join(sorted(_FORMATS))})"
             )
         return fmt
     fmt = _EXT_FORMAT.get(path.suffix.lower())
     if fmt is None:
         raise FileError(
             f"cannot infer format from extension {path.suffix!r}; "
-            f"pass --format (parquet|csv|jsonl)"
+            f"pass --format (parquet|csv|jsonl|lance)"
         )
     return fmt
 
@@ -121,10 +129,19 @@ def parse_columns(raw: str) -> list[str]:
     return list(seen)
 
 
+def _is_target(p: str) -> bool:
+    """True for an ordinary file, or a Lance dataset (a ``*.lance`` directory)."""
+    return os.path.isfile(p) or (os.path.isdir(p) and p.lower().endswith(".lance"))
+
+
 def resolve_files(pattern: str) -> list[Path]:
-    """Expand a path-or-wildcard into a sorted list of existing files."""
+    """Expand a path-or-wildcard into a sorted list of existing targets.
+
+    A target is an ordinary file or a Lance dataset directory (``*.lance``);
+    other directories are ignored so a wildcard never picks up plain folders.
+    """
     matches = sorted(glob.glob(pattern, recursive=True))
-    files = [Path(m) for m in matches if os.path.isfile(m)]
+    files = [Path(m) for m in matches if _is_target(m)]
     if not files:
         if glob.has_magic(pattern):
             raise SystemExit(f"error: no files match pattern: {pattern}")
@@ -152,6 +169,57 @@ def plan_order(existing: list[str], front: list[str]) -> tuple[list[str], list[s
     return front_canonical, front_canonical + rest
 
 
+def process_lance_file(
+    path: Path,
+    front: list[str],
+) -> tuple[str, list[str], bool]:
+    """Reorder one Lance dataset in place. Returns ('lance', new_order, changed).
+
+    Lance has no DuckDB writer, so this rewrites the dataset with pylance: it
+    streams the rows back out projected in the new column order (the scanner
+    honors the requested order) into a fresh dataset in the same directory, then
+    atomically swaps it in. The original is moved aside first and restored on any
+    failure, so a mid-write error can't corrupt or lose the source. A dataset
+    already in the requested order is left on disk untouched. Opens its own
+    dataset handle so it is safe to run from a worker thread.
+    """
+    import lance  # imported lazily so non-Lance use needs no pylance
+
+    try:
+        ds = lance.dataset(str(path))
+    except Exception as exc:  # corrupt / incomplete / not a Lance dataset
+        raise FileError(f"could not open dataset: {exc}") from exc
+
+    existing = list(ds.schema.names)
+    _, new_order = plan_order(existing, front)
+    if new_order == existing:
+        return "lance", new_order, False
+
+    # Write the reordered dataset beside the original, then swap directories. The
+    # new dataset goes in a not-yet-existing subdir of a private temp dir so Lance
+    # creates it fresh (no "overwrite an empty dir" warning); the temp dir's name
+    # starts with '.' so a concurrent scan/glob ignores the in-progress write.
+    work = Path(tempfile.mkdtemp(dir=str(path.parent), prefix=f".{path.name}."))
+    new_ds = work / path.name
+    backup = work / (path.name + ".bak")
+    try:
+        # Stream batches projected in the new order straight into a new dataset
+        # (the scanner honors the requested order; no full-table materialization).
+        lance.write_dataset(ds.scanner(columns=new_order).to_reader(), str(new_ds))
+        os.replace(path, backup)  # move the original aside
+        try:
+            os.replace(new_ds, path)  # move the new dataset into place
+        except BaseException:
+            os.replace(backup, path)  # restore the original on failure
+            raise
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+    shutil.rmtree(work, ignore_errors=True)  # removes the leftover backup too
+
+    return "lance", new_order, True
+
+
 def process_file(
     path: Path,
     front: list[str],
@@ -163,6 +231,8 @@ def process_file(
     A file already in the requested order is left on disk untouched.
     """
     fmt = detect_format(path, fmt_override)
+    if fmt == "lance":
+        return process_lance_file(path, front)
 
     con = duckdb.connect()
     try:
@@ -223,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--format",
         dest="format",
-        choices=sorted(_READERS),
+        choices=sorted(_FORMATS),
         default=None,
         help="override the format instead of inferring it from each extension",
     )

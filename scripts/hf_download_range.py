@@ -6,10 +6,12 @@
 """Download a sequential range of files from a Hugging Face repo via the HF SDK.
 
 Give it two ``.../resolve/<rev>/<file>`` URLs that are identical except for one
-zero-padded counter (e.g. ``00000.parquet`` and ``03633.parquet``). The script
-walks the counter from the first number to the second *inclusive*, incrementing
-by one, and downloads every file with ``huggingface_hub`` -- 20 files at a time
-by default.
+counter (e.g. ``00000.parquet`` and ``03633.parquet``, or ``images-1.parquet``
+and ``images-11.parquet``). The script walks the counter from the first number
+to the second *inclusive*, incrementing by one, and downloads every file with
+``huggingface_hub`` -- 20 files at a time by default. The counter is reproduced
+in the start URL's format: zero-padded only when the start number itself is
+zero-padded (``00000``), otherwise the natural number (``1``, ``2`` ... ``11``).
 
 The access token is read from the ``HF_TOKEN`` environment variable (falling
 back to ``HUGGINGFACE_HUB_TOKEN``). If neither is set, downloads proceed
@@ -145,12 +147,19 @@ def find_counter(start: str, end: str) -> tuple[list[str], int, int, int, int]:
         )
 
     idx = differing[0]
-    start_num, end_num = int(a[idx]), int(b[idx])
+    start_tok = a[idx]
+    start_num, end_num = int(start_tok), int(b[idx])
     if start_num > end_num:
         raise SystemExit(
             f"error: start number {a[idx]} is greater than end number {b[idx]}"
         )
-    width = max(len(a[idx]), len(b[idx]))
+    # Zero-padding only applies when the counter is a fixed-width field written
+    # with a leading zero (e.g. ``00000``). If the start token has no leading
+    # zero the repo names files with the natural number, so we must not widen to
+    # match a longer end token -- doing so turns ``1`` into ``01`` and requests
+    # files (``images-01.parquet``) that don't exist. ``zfill`` never truncates,
+    # so a counter that grows past ``width`` digits (1 -> 11) just keeps growing.
+    width = len(start_tok) if start_tok.startswith("0") else 1
     return a, idx, start_num, end_num, width
 
 
