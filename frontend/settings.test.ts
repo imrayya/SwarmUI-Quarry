@@ -6,17 +6,22 @@ import {
     datasetFolder,
     datasetLeafName,
     formatRowCount,
-    groupDatasetsByFolder,
     PREVIEW_LOAD_MORE_COUNT,
     PREVIEW_ROW_LIMIT,
     renderDatasetRow,
     renderDatasets,
-    renderFolderGroup,
+    renderFolderHeaderRow,
     renderPreviewStatus,
     renderPreviewTable,
 } from "./settings";
 import type { DatasetDto } from "./types";
-import { escapeHtml } from "./util";
+import {
+    allAncestorsExpanded,
+    buildFolderTree,
+    escapeHtml,
+    type FolderNode,
+    folderDatasetCount,
+} from "./util";
 
 /// Minimal valid dataset DTO for grouping/render tests; override just the fields a test cares about.
 const makeDataset = (
@@ -245,8 +250,8 @@ describe("renderDatasets", () => {
             makeDataset({ name: "anime/1girl" }),
             makeDataset({ name: "anime/2girls" }),
         ]);
-        // A folder group tbody that starts collapsed, with the folder name and a count of its members.
-        expect(html).toContain('class="quarry-folder-group quarry-collapsed"');
+        // A folder header row that starts collapsed, with the folder name and a count of its members.
+        expect(html).toContain('class="quarry-folder-row quarry-collapsed"');
         expect(html).toContain('data-folder="anime"');
         expect(html).toContain('aria-expanded="false"');
         expect(html).toContain('<span class="quarry-folder-name">anime</span>');
@@ -263,9 +268,25 @@ describe("renderDatasets", () => {
             [makeDataset({ name: "anime/1girl" })],
             new Set(["anime"]),
         );
-        expect(html).toContain('class="quarry-folder-group"');
+        expect(html).toContain('class="quarry-folder-row"');
         expect(html).not.toContain("quarry-collapsed");
         expect(html).toContain('aria-expanded="true"');
+    });
+
+    it("nests a sub-folder inside its parent rather than beside it", () => {
+        const html = renderDatasets([
+            makeDataset({ name: "tags/X779.Danbooruwildcards/foo" }),
+        ]);
+        // The parent "tags" is top-level (no data-parent); the sub-folder lives under it.
+        expect(html).toContain('data-folder="tags"');
+        expect(html).toContain(
+            'data-folder="tags/X779.Danbooruwildcards" data-parent="tags"',
+        );
+        // The dataset hangs off the full sub-folder path, not "tags".
+        expect(html).toContain(
+            'data-dataset="tags/X779.Danbooruwildcards/foo" data-parent="tags/X779.Danbooruwildcards"',
+        );
+        expect(html).toContain(">foo</button>");
     });
 
     it("keeps top-level datasets ungrouped alongside folder groups", () => {
@@ -320,56 +341,99 @@ describe("datasetLeafName", () => {
     });
 });
 
-describe("groupDatasetsByFolder", () => {
+describe("buildFolderTree", () => {
     it("splits loose datasets from per-folder groups, sorting folders", () => {
-        const { loose, groups } = groupDatasetsByFolder([
+        const { loose, folders } = buildFolderTree([
             makeDataset({ name: "loose" }),
             makeDataset({ name: "zebra/a" }),
             makeDataset({ name: "anime/1girl" }),
             makeDataset({ name: "anime/2girls" }),
         ]);
         expect(loose.map((d) => d.name)).toEqual(["loose"]);
-        expect(groups.map((g) => g.folder)).toEqual(["anime", "zebra"]);
-        expect(groups[0].datasets.map((d) => d.name)).toEqual([
+        expect(folders.map((g) => g.path)).toEqual(["anime", "zebra"]);
+        expect(folders[0].items.map((d) => d.name)).toEqual([
             "anime/1girl",
             "anime/2girls",
         ]);
     });
 
-    it("yields no groups for a fully flat list", () => {
-        const { loose, groups } = groupDatasetsByFolder([
+    it("nests multi-segment paths under intermediate folders", () => {
+        const { folders } = buildFolderTree([
+            makeDataset({ name: "tags/X779.Danbooruwildcards/foo" }),
+            makeDataset({ name: "tags/plain" }),
+        ]);
+        expect(folders.map((f) => f.path)).toEqual(["tags"]);
+        const tags = folders[0];
+        // The sub-folder nests inside "tags" instead of becoming a sibling.
+        expect(tags.folders.map((f) => f.path)).toEqual([
+            "tags/X779.Danbooruwildcards",
+        ]);
+        expect(tags.name).toBe("tags");
+        expect(tags.folders[0].name).toBe("X779.Danbooruwildcards");
+        expect(tags.items.map((d) => d.name)).toEqual(["tags/plain"]);
+        expect(tags.folders[0].items.map((d) => d.name)).toEqual([
+            "tags/X779.Danbooruwildcards/foo",
+        ]);
+    });
+
+    it("yields no folders for a fully flat list", () => {
+        const { loose, folders } = buildFolderTree([
             makeDataset({ name: "a" }),
             makeDataset({ name: "b" }),
         ]);
-        expect(groups).toEqual([]);
+        expect(folders).toEqual([]);
         expect(loose).toHaveLength(2);
     });
 });
 
-describe("renderFolderGroup", () => {
-    it("renders a tbody with a header and one row per dataset", () => {
-        const html = renderFolderGroup(
-            {
-                folder: "anime",
-                datasets: [
-                    makeDataset({ name: "anime/1girl" }),
-                    makeDataset({ name: "anime/2girls" }),
-                ],
-            },
-            true,
-        );
-        expect(html).toContain("<tbody");
-        expect(html).toContain('class="quarry-folder-group"');
+describe("folderDatasetCount", () => {
+    it("counts datasets across nested sub-folders", () => {
+        const { folders } = buildFolderTree([
+            makeDataset({ name: "tags/a" }),
+            makeDataset({ name: "tags/sub/b" }),
+            makeDataset({ name: "tags/sub/c" }),
+        ]);
+        expect(folderDatasetCount(folders[0])).toBe(3);
+    });
+});
+
+describe("allAncestorsExpanded", () => {
+    it("is true only when every ancestor folder is expanded", () => {
+        const expanded = new Set(["tags"]);
+        expect(allAncestorsExpanded(null, expanded)).toBe(true);
+        expect(allAncestorsExpanded("tags", expanded)).toBe(true);
+        expect(allAncestorsExpanded("tags/sub", expanded)).toBe(false);
+        expect(
+            allAncestorsExpanded("tags/sub", new Set(["tags", "tags/sub"])),
+        ).toBe(true);
+    });
+});
+
+describe("renderFolderHeaderRow", () => {
+    const node: FolderNode<DatasetDto> = {
+        path: "anime",
+        name: "anime",
+        folders: [],
+        items: [
+            makeDataset({ name: "anime/1girl" }),
+            makeDataset({ name: "anime/2girls" }),
+        ],
+    };
+
+    it("renders an expanded header row with a recursive dataset count", () => {
+        const html = renderFolderHeaderRow(node, 0, new Set(["anime"]));
+        expect(html).toContain('class="quarry-folder-row"');
+        expect(html).not.toContain("quarry-collapsed");
+        expect(html).toContain('data-folder="anime"');
         expect(html).toContain('aria-expanded="true"');
-        expect(html).toContain('data-dataset="anime/1girl"');
-        expect(html).toContain('data-dataset="anime/2girls"');
+        expect(html).toContain('<span class="quarry-folder-name">anime</span>');
+        expect(html).toContain(
+            '<span class="quarry-folder-count" title="2 dataset(s)">2</span>',
+        );
     });
 
-    it("marks the group collapsed when not expanded", () => {
-        const html = renderFolderGroup(
-            { folder: "anime", datasets: [makeDataset({ name: "anime/x" })] },
-            false,
-        );
+    it("marks the header collapsed when not in the expanded set", () => {
+        const html = renderFolderHeaderRow(node, 0, new Set());
         expect(html).toContain("quarry-collapsed");
         expect(html).toContain('aria-expanded="false"');
     });

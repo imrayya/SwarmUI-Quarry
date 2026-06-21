@@ -5,11 +5,11 @@ import {
     renderRemoteDatasetName,
     renderRemoteDatasetRow,
     renderRemoteDatasets,
-    renderRemoteFolderGroup,
+    renderRemoteFolderHeaderRow,
     sourceRepoUrl,
 } from "./download";
 import type { RemoteDatasetDto } from "./types";
-import { formatBytes } from "./util";
+import { type FolderNode, formatBytes } from "./util";
 
 const makeRemote = (name: string, installed = false): RemoteDatasetDto => ({
     name,
@@ -109,8 +109,8 @@ describe("renderRemoteDatasets", () => {
             makeRemote("X779.Danbooruwildcards/DTR2024_1boy"),
             makeRemote("X779.Danbooruwildcards/DTR2024_1girl"),
         ]);
-        // A collapsible folder group, collapsed by default, with a 3-column-wide header and a count of 2.
-        expect(html).toContain('class="quarry-folder-group quarry-collapsed"');
+        // A collapsible folder header row, collapsed by default, with a 3-column-wide header and a count of 2.
+        expect(html).toContain('class="quarry-folder-row quarry-collapsed"');
         expect(html).toContain('data-folder="X779.Danbooruwildcards"');
         expect(html).toContain("quarry-folder-toggle");
         expect(html).toContain('aria-expanded="false"');
@@ -130,38 +130,45 @@ describe("renderRemoteDatasets", () => {
             [makeRemote("anime/1girl")],
             new Set(["anime"]),
         );
-        expect(html).toContain('class="quarry-folder-group"');
+        expect(html).toContain('class="quarry-folder-row"');
         expect(html).not.toContain("quarry-collapsed");
         expect(html).toContain('aria-expanded="true"');
     });
+
+    it("nests a sub-folder inside its parent rather than beside it", () => {
+        const html = renderRemoteDatasets([
+            makeRemote("tags/X779.Danbooruwildcards/DTR2024_1girl"),
+        ]);
+        expect(html).toContain('data-folder="tags"');
+        expect(html).toContain(
+            'data-folder="tags/X779.Danbooruwildcards" data-parent="tags"',
+        );
+        expect(html).toContain(
+            'data-dataset="tags/X779.Danbooruwildcards/DTR2024_1girl" data-parent="tags/X779.Danbooruwildcards"',
+        );
+        expect(html).toContain(">DTR2024_1girl</a>");
+    });
 });
 
-describe("renderRemoteFolderGroup", () => {
-    it("renders a tbody with a header and one leaf-named row per dataset", () => {
-        const html = renderRemoteFolderGroup(
-            {
-                folder: "anime",
-                items: [makeRemote("anime/1girl"), makeRemote("anime/2girls")],
-            },
-            true,
-        );
-        expect(html).toContain("<tbody");
-        expect(html).toContain('class="quarry-folder-group"');
+describe("renderRemoteFolderHeaderRow", () => {
+    const node: FolderNode<RemoteDatasetDto> = {
+        path: "anime",
+        name: "anime",
+        folders: [],
+        items: [makeRemote("anime/1girl"), makeRemote("anime/2girls")],
+    };
+
+    it("renders a 3-column header row with a recursive dataset count", () => {
+        const html = renderRemoteFolderHeaderRow(node, 0, new Set(["anime"]));
+        expect(html).toContain('class="quarry-folder-row"');
         expect(html).toContain('colspan="3"');
         expect(html).toContain('aria-expanded="true"');
-        expect(html).toContain('data-dataset="anime/1girl"');
-        // Rows show only the leaf name. ("anime" has no dot, so the leaf is plain text, not a source link.)
-        expect(html).toContain(">1girl<");
-        expect(html).toContain(">2girls<");
-        expect(html).not.toContain(">anime/1girl<");
+        expect(html).toContain('<span class="quarry-folder-name">anime</span>');
         expect(html).toContain('title="2 dataset(s)"');
     });
 
-    it("marks the group collapsed when not expanded", () => {
-        const html = renderRemoteFolderGroup(
-            { folder: "anime", items: [makeRemote("anime/x")] },
-            false,
-        );
+    it("marks the header collapsed when not expanded", () => {
+        const html = renderRemoteFolderHeaderRow(node, 0, new Set());
         expect(html).toContain("quarry-collapsed");
         expect(html).toContain('aria-expanded="false"');
     });

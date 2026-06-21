@@ -27,32 +27,95 @@ export const datasetFolder = (name: string): string | null => {
 export const datasetLeafName = (name: string): string =>
     name.slice(name.lastIndexOf("/") + 1);
 
-export interface NameFolderGroup<T> {
-    folder: string;
+export interface FolderNode<T> {
+    path: string;
+    name: string;
+    folders: FolderNode<T>[];
     items: T[];
 }
 
-export const groupByFolder = <T extends { name: string }>(
+export interface FolderTree<T> {
+    loose: T[];
+    folders: FolderNode<T>[];
+}
+
+export const buildFolderTree = <T extends { name: string }>(
     items: T[],
-): { loose: T[]; groups: NameFolderGroup<T>[] } => {
+): FolderTree<T> => {
     const loose: T[] = [];
-    const byFolder = new Map<string, T[]>();
+    const roots: FolderNode<T>[] = [];
+    const byPath = new Map<string, FolderNode<T>>();
+
+    const ensureFolder = (path: string): FolderNode<T> => {
+        const existing = byPath.get(path);
+        if (existing) {
+            return existing;
+        }
+        const slash = path.lastIndexOf("/");
+        const node: FolderNode<T> = {
+            path,
+            name: path.slice(slash + 1),
+            folders: [],
+            items: [],
+        };
+        byPath.set(path, node);
+        if (slash > 0) {
+            ensureFolder(path.slice(0, slash)).folders.push(node);
+        } else {
+            roots.push(node);
+        }
+        return node;
+    };
+
     for (const item of items) {
         const folder = datasetFolder(item.name);
         if (folder === null) {
             loose.push(item);
-            continue;
-        }
-        const existing = byFolder.get(folder);
-        if (existing) {
-            existing.push(item);
         } else {
-            byFolder.set(folder, [item]);
+            ensureFolder(folder).items.push(item);
         }
     }
-    const groups = Array.from(byFolder, ([folder, grouped]) => ({
-        folder,
-        items: grouped,
-    })).sort((a, b) => a.folder.localeCompare(b.folder));
-    return { loose, groups };
+
+    const sortNode = (node: FolderNode<T>): void => {
+        node.folders.sort((a, b) => a.name.localeCompare(b.name));
+        node.folders.forEach(sortNode);
+    };
+    roots.sort((a, b) => a.name.localeCompare(b.name));
+    roots.forEach(sortNode);
+
+    return { loose, folders: roots };
+};
+
+export const folderDatasetCount = <T>(node: FolderNode<T>): number =>
+    node.items.length +
+    node.folders.reduce((sum, child) => sum + folderDatasetCount(child), 0);
+
+export const folderPrefixes = (path: string): string[] => {
+    const prefixes: string[] = [];
+    let acc = "";
+    for (const part of path.split("/")) {
+        acc = acc ? `${acc}/${part}` : part;
+        prefixes.push(acc);
+    }
+    return prefixes;
+};
+
+export const allAncestorsExpanded = (
+    container: string | null,
+    expanded: ReadonlySet<string>,
+): boolean =>
+    !container || folderPrefixes(container).every((p) => expanded.has(p));
+
+export const refreshFolderVisibility = (
+    container: HTMLElement,
+    expanded: ReadonlySet<string>,
+): void => {
+    for (const row of Array.from(
+        container.querySelectorAll<HTMLElement>("[data-parent]"),
+    )) {
+        row.classList.toggle(
+            "quarry-row-hidden",
+            !allAncestorsExpanded(row.getAttribute("data-parent"), expanded),
+        );
+    }
 };

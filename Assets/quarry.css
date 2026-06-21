@@ -115,13 +115,11 @@
     color: var(--text-soft);
 }
 
-/* --- Folder grouping (collapsible) --- */
 .quarry-folder-row > td {
     padding: 0;
     border-top: 1px solid var(--light-border);
 }
 
-/* The whole header row is the toggle: a full-width button reset that reads as a section heading. */
 .quarry-folder-toggle {
     display: flex;
     align-items: center;
@@ -129,6 +127,7 @@
     width: 100%;
     margin: 0;
     padding: 0.35rem 0.5rem;
+    padding-left: calc(0.5rem + var(--quarry-depth, 0) * 1.25rem);
     border: none;
     background: var(--background-soft);
     color: var(--text);
@@ -160,7 +159,7 @@
     content: "\02B9F";
 }
 
-.quarry-folder-group.quarry-collapsed .quarry-folder-caret::before {
+.quarry-folder-row.quarry-collapsed .quarry-folder-caret::before {
     content: "\02B9E";
 }
 
@@ -168,7 +167,6 @@
     overflow-wrap: anywhere;
 }
 
-/* Highlight the folder name when its header is hovered or focused, mirroring the dataset-name links. */
 .quarry-folder-toggle:hover .quarry-folder-name,
 .quarry-folder-toggle:focus-visible .quarry-folder-name {
     color: var(--emphasis);
@@ -185,14 +183,13 @@
     padding: 0 0.45rem;
 }
 
-.quarry-folder-group.quarry-collapsed .quarry-dataset-row,
-.quarry-folder-group.quarry-collapsed .quarry-remote-row {
+.quarry-row-hidden {
     display: none;
 }
 
-.quarry-folder-group .quarry-dataset-row > td:first-child,
-.quarry-folder-group .quarry-remote-row > td:first-child {
-    padding-left: 1.75rem;
+.quarry-dataset-row[data-parent] > td:first-child,
+.quarry-remote-row[data-parent] > td:first-child {
+    padding-left: calc(0.5rem + var(--quarry-depth, 0) * 1.25rem);
 }
 
 .quarry-dataset-error {

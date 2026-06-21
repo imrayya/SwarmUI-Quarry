@@ -5,11 +5,15 @@ import type {
     StartDownloadResponse,
 } from "./types";
 import {
+    allAncestorsExpanded,
+    buildFolderTree,
+    datasetFolder,
     datasetLeafName,
     escapeHtml,
+    type FolderNode,
+    folderDatasetCount,
     formatBytes,
-    groupByFolder,
-    type NameFolderGroup,
+    refreshFolderVisibility,
 } from "./util";
 
 const MODAL_ID = "quarry-download-modal";
@@ -50,19 +54,26 @@ export const renderRemoteDatasetName = (
 export const renderRemoteDatasetRow = (
     dataset: RemoteDatasetDto,
     displayName: string = dataset.name,
+    depth = 0,
+    container: string | null = null,
+    hidden = false,
 ): string => {
     const name = escapeHtml(dataset.name);
     const installed = dataset.installed;
     const rowClass = installed
         ? "quarry-remote-row quarry-remote-installed"
         : "quarry-remote-row";
+    const hiddenClass = hidden ? " quarry-row-hidden" : "";
+    const parentAttr = container
+        ? ` data-parent="${escapeHtml(container)}"`
+        : "";
     const check = installed
         ? `<span class="quarry-remote-check" title="Installed">✓</span> `
         : "";
     const title = installed
         ? "Already installed — select to redownload"
         : "Select to download";
-    return `<tr class="${rowClass}" data-dataset="${name}">
+    return `<tr class="${rowClass}${hiddenClass}" data-dataset="${name}"${parentAttr} style="--quarry-depth: ${depth}">
         <td class="quarry-remote-selcell">
             <input type="checkbox" class="quarry-remote-select" data-dataset="${name}" data-installed="${installed}" title="${title}" />
         </td>
@@ -71,29 +82,56 @@ export const renderRemoteDatasetRow = (
     </tr>`;
 };
 
-export const renderRemoteFolderGroup = (
-    group: NameFolderGroup<RemoteDatasetDto>,
-    expanded: boolean,
+export const renderRemoteFolderHeaderRow = (
+    node: FolderNode<RemoteDatasetDto>,
+    depth: number,
+    expanded: ReadonlySet<string>,
 ): string => {
-    const folder = escapeHtml(group.folder);
-    const collapsedClass = expanded ? "" : " quarry-collapsed";
-    const rows = group.items
+    const path = escapeHtml(node.path);
+    const collapsed = !expanded.has(node.path);
+    const container = datasetFolder(node.path);
+    const count = folderDatasetCount(node);
+    const hiddenClass = allAncestorsExpanded(container, expanded)
+        ? ""
+        : " quarry-row-hidden";
+    const collapsedClass = collapsed ? " quarry-collapsed" : "";
+    const parentAttr = container
+        ? ` data-parent="${escapeHtml(container)}"`
+        : "";
+    return `<tr class="quarry-folder-row${collapsedClass}${hiddenClass}" data-folder="${path}"${parentAttr} style="--quarry-depth: ${depth}">
+        <td colspan="3">
+            <button type="button" class="quarry-folder-toggle" data-folder="${path}" aria-expanded="${!collapsed}" title="Show or hide the datasets in this folder">
+                <span class="quarry-folder-caret" aria-hidden="true"></span>
+                <span class="quarry-folder-name">${escapeHtml(node.name)}</span>
+                <span class="quarry-folder-count" title="${count} dataset(s)">${count}</span>
+            </button>
+        </td>
+    </tr>`;
+};
+
+const renderRemoteFolderNode = (
+    node: FolderNode<RemoteDatasetDto>,
+    depth: number,
+    expanded: ReadonlySet<string>,
+): string => {
+    const childrenHidden = !allAncestorsExpanded(node.path, expanded);
+    const subFolders = node.folders
+        .map((child) => renderRemoteFolderNode(child, depth + 1, expanded))
+        .join("");
+    const items = node.items
         .map((dataset) =>
-            renderRemoteDatasetRow(dataset, datasetLeafName(dataset.name)),
+            renderRemoteDatasetRow(
+                dataset,
+                datasetLeafName(dataset.name),
+                depth + 1,
+                node.path,
+                childrenHidden,
+            ),
         )
         .join("");
-    return `<tbody class="quarry-folder-group${collapsedClass}" data-folder="${folder}">
-        <tr class="quarry-folder-row">
-            <td colspan="3">
-                <button type="button" class="quarry-folder-toggle" data-folder="${folder}" aria-expanded="${expanded}" title="Show or hide the datasets in this folder">
-                    <span class="quarry-folder-caret" aria-hidden="true"></span>
-                    <span class="quarry-folder-name">${folder}</span>
-                    <span class="quarry-folder-count" title="${group.items.length} dataset(s)">${group.items.length}</span>
-                </button>
-            </td>
-        </tr>
-        ${rows}
-    </tbody>`;
+    return (
+        renderRemoteFolderHeaderRow(node, depth, expanded) + subFolders + items
+    );
 };
 
 export const renderRemoteDatasets = (
@@ -103,22 +141,20 @@ export const renderRemoteDatasets = (
     if (!list || list.length === 0) {
         return `<div class="quarry-remote-empty">No datasets available right now.</div>`;
     }
-    const { loose, groups } = groupByFolder(list);
-    const groupBodies = groups
-        .map((group) =>
-            renderRemoteFolderGroup(group, expandedFolders.has(group.folder)),
-        )
+    const { loose, folders } = buildFolderTree(list);
+    const folderRows = folders
+        .map((folder) => renderRemoteFolderNode(folder, 0, expandedFolders))
         .join("");
-    const looseBody = loose.length
-        ? `<tbody>${loose.map((dataset) => renderRemoteDatasetRow(dataset)).join("")}</tbody>`
-        : "";
+    const looseRows = loose
+        .map((dataset) => renderRemoteDatasetRow(dataset))
+        .join("");
     return `<table class="quarry-remote-table">
         <thead><tr>
             <th class="quarry-remote-selcell"><input type="checkbox" class="quarry-remote-selectall" title="Select all" /></th>
             <th>Dataset</th>
             <th>Size</th>
         </tr></thead>
-        ${groupBodies}${looseBody}
+        <tbody>${folderRows}${looseRows}</tbody>
     </table>`;
 };
 
@@ -563,16 +599,20 @@ const progressClickHandler = (event: Event): void => {
 
 const toggleFolder = (toggle: HTMLElement): void => {
     const folder = toggle.getAttribute("data-folder");
-    const group = toggle.closest<HTMLElement>(".quarry-folder-group");
-    if (!folder || !group) {
+    const row = toggle.closest<HTMLElement>(".quarry-folder-row");
+    if (!folder || !row) {
         return;
     }
-    const collapsed = group.classList.toggle("quarry-collapsed");
+    const collapsed = row.classList.toggle("quarry-collapsed");
     toggle.setAttribute("aria-expanded", String(!collapsed));
     if (collapsed) {
         expandedFolders.delete(folder);
     } else {
         expandedFolders.add(folder);
+    }
+    const body = document.getElementById(BODY_ID);
+    if (body) {
+        refreshFolderVisibility(body, expandedFolders);
     }
 };
 

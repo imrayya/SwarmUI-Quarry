@@ -15,10 +15,14 @@ import type {
     SettingsResponse,
 } from "./types";
 import {
+    allAncestorsExpanded,
+    buildFolderTree,
     datasetFolder,
     datasetLeafName,
     escapeHtml,
-    groupByFolder,
+    type FolderNode,
+    folderDatasetCount,
+    refreshFolderVisibility,
 } from "./util";
 
 export { datasetFolder, datasetLeafName };
@@ -84,16 +88,24 @@ export const renderDatasetNameButton = (
 export const renderDatasetRow = (
     dataset: DatasetDto,
     displayName: string = dataset.name,
+    depth = 0,
+    container: string | null = null,
+    hidden = false,
 ): string => {
     const name = escapeHtml(dataset.name);
     const label = escapeHtml(displayName);
+    const cls = `quarry-dataset-row${hidden ? " quarry-row-hidden" : ""}`;
+    const parentAttr = container
+        ? ` data-parent="${escapeHtml(container)}"`
+        : "";
+    const attrs = `${parentAttr} style="--quarry-depth: ${depth}"`;
     if (dataset.error) {
-        return `<tr class="quarry-dataset-row quarry-dataset-error" data-dataset="${name}">
+        return `<tr class="${cls} quarry-dataset-error" data-dataset="${name}"${attrs}>
             <td class="quarry-dataset-name-cell">${renderDatasetNameButton(name, label)}</td>
             <td colspan="4"><span class="quarry-dataset-error-msg">⚠️ ${escapeHtml(dataset.error)}</span></td>
         </tr>`;
     }
-    return `<tr class="quarry-dataset-row" data-dataset="${name}">
+    return `<tr class="${cls}" data-dataset="${name}"${attrs}>
         <td class="quarry-dataset-name-cell">${renderDatasetNameButton(name, label)}</td>
         <td><select class="quarry-dataset-column" data-dataset="${name}">${renderDatasetOptions(dataset)}</select></td>
         <td class="quarry-dataset-tags" title="Columns the 'tags' keyword searches across">${renderTagCheckboxes(dataset)}</td>
@@ -102,47 +114,54 @@ export const renderDatasetRow = (
     </tr>`;
 };
 
-export interface DatasetFolderGroup {
-    folder: string;
-    datasets: DatasetDto[];
-}
-
-export const groupDatasetsByFolder = (
-    datasets: DatasetDto[],
-): { loose: DatasetDto[]; groups: DatasetFolderGroup[] } => {
-    const { loose, groups } = groupByFolder(datasets);
-    return {
-        loose,
-        groups: groups.map((group) => ({
-            folder: group.folder,
-            datasets: group.items,
-        })),
-    };
+export const renderFolderHeaderRow = (
+    node: FolderNode<DatasetDto>,
+    depth: number,
+    expanded: ReadonlySet<string>,
+): string => {
+    const path = escapeHtml(node.path);
+    const collapsed = !expanded.has(node.path);
+    const container = datasetFolder(node.path);
+    const count = folderDatasetCount(node);
+    const hiddenClass = allAncestorsExpanded(container, expanded)
+        ? ""
+        : " quarry-row-hidden";
+    const collapsedClass = collapsed ? " quarry-collapsed" : "";
+    const parentAttr = container
+        ? ` data-parent="${escapeHtml(container)}"`
+        : "";
+    return `<tr class="quarry-folder-row${collapsedClass}${hiddenClass}" data-folder="${path}"${parentAttr} style="--quarry-depth: ${depth}">
+        <td colspan="5">
+            <button type="button" class="quarry-folder-toggle" data-folder="${path}" aria-expanded="${!collapsed}" title="Show or hide the datasets in this folder">
+                <span class="quarry-folder-caret" aria-hidden="true"></span>
+                <span class="quarry-folder-name">${escapeHtml(node.name)}</span>
+                <span class="quarry-folder-count" title="${count} dataset(s)">${count}</span>
+            </button>
+        </td>
+    </tr>`;
 };
 
-export const renderFolderGroup = (
-    group: DatasetFolderGroup,
-    expanded: boolean,
+const renderFolderNode = (
+    node: FolderNode<DatasetDto>,
+    depth: number,
+    expanded: ReadonlySet<string>,
 ): string => {
-    const folder = escapeHtml(group.folder);
-    const collapsedClass = expanded ? "" : " quarry-collapsed";
-    const rows = group.datasets
+    const childrenHidden = !allAncestorsExpanded(node.path, expanded);
+    const subFolders = node.folders
+        .map((child) => renderFolderNode(child, depth + 1, expanded))
+        .join("");
+    const items = node.items
         .map((dataset) =>
-            renderDatasetRow(dataset, datasetLeafName(dataset.name)),
+            renderDatasetRow(
+                dataset,
+                datasetLeafName(dataset.name),
+                depth + 1,
+                node.path,
+                childrenHidden,
+            ),
         )
         .join("");
-    return `<tbody class="quarry-folder-group${collapsedClass}" data-folder="${folder}">
-        <tr class="quarry-folder-row">
-            <td colspan="5">
-                <button type="button" class="quarry-folder-toggle" data-folder="${folder}" aria-expanded="${expanded}" title="Show or hide the datasets in this folder">
-                    <span class="quarry-folder-caret" aria-hidden="true"></span>
-                    <span class="quarry-folder-name">${folder}</span>
-                    <span class="quarry-folder-count" title="${group.datasets.length} dataset(s)">${group.datasets.length}</span>
-                </button>
-            </td>
-        </tr>
-        ${rows}
-    </tbody>`;
+    return renderFolderHeaderRow(node, depth, expanded) + subFolders + items;
 };
 
 export const renderDatasets = (
@@ -152,20 +171,18 @@ export const renderDatasets = (
     if (!datasets || datasets.length === 0) {
         return `<div class="quarry-datasets-empty">No datasets found. Set a folder containing CSV / JSON / JSONL / Parquet / Lance files, then Refresh.</div>`;
     }
-    const { loose, groups } = groupDatasetsByFolder(datasets);
-    const groupBodies = groups
-        .map((group) =>
-            renderFolderGroup(group, expandedFolders.has(group.folder)),
-        )
+    const { loose, folders } = buildFolderTree(datasets);
+    const folderRows = folders
+        .map((folder) => renderFolderNode(folder, 0, expandedFolders))
         .join("");
-    const looseBody = loose.length
-        ? `<tbody>${loose.map((dataset) => renderDatasetRow(dataset)).join("")}</tbody>`
-        : "";
+    const looseRows = loose
+        .map((dataset) => renderDatasetRow(dataset))
+        .join("");
     return `<table class="quarry-datasets-table">
         <thead>
             <tr><th>Dataset</th><th>Prompt column</th><th>Tag columns</th><th>Rows</th><th>Preview</th></tr>
         </thead>
-        ${groupBodies}${looseBody}
+        <tbody>${folderRows}${looseRows}</tbody>
     </table>`;
 };
 
@@ -625,16 +642,20 @@ const clearPreviewCache = (): void => {
 
 const toggleFolder = (toggle: HTMLElement): void => {
     const folder = toggle.getAttribute("data-folder");
-    const group = toggle.closest<HTMLElement>(".quarry-folder-group");
-    if (!folder || !group) {
+    const row = toggle.closest<HTMLElement>(".quarry-folder-row");
+    if (!folder || !row) {
         return;
     }
-    const collapsed = group.classList.toggle("quarry-collapsed");
+    const collapsed = row.classList.toggle("quarry-collapsed");
     toggle.setAttribute("aria-expanded", String(!collapsed));
     if (collapsed) {
         expandedFolders.delete(folder);
     } else {
         expandedFolders.add(folder);
+    }
+    const container = document.getElementById("quarry-datasets");
+    if (container) {
+        refreshFolderVisibility(container, expandedFolders);
     }
 };
 
