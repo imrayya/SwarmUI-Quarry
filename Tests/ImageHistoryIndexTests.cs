@@ -54,6 +54,39 @@ public class ImageHistoryIndexTests
         Assert.Contains("full_metadata", ImageHistoryIndex.ResultColumns);
     }
 
+    [Fact]
+    public void CreateTableSql_AddsLowercaseCompanionColumns()
+    {
+        string sql = ImageHistoryIndex.CreateTableSql("q.main.idx");
+        Assert.Contains("prompt__lc VARCHAR", sql);
+        Assert.Contains("sampler__lc VARCHAR", sql);
+    }
+
+    [Fact]
+    public void MergeUpsertSql_ComputesAndWritesLowercaseCompanions()
+    {
+        string sql = ImageHistoryIndex.MergeUpsertSql("t", "'/tmp/s.json'");
+        Assert.Contains("lower(prompt) AS prompt__lc", sql); // computed in the staged source
+        Assert.Contains("prompt__lc = s.prompt__lc", sql);   // populated on UPDATE
+        Assert.Contains("s.prompt__lc", sql);                // populated on INSERT
+    }
+
+    [Fact]
+    public void ResultColumns_ExcludeLowercaseCompanions()
+    {
+        // Companions are internal search columns; they must never leak into browser result rows.
+        Assert.DoesNotContain("prompt__lc", ImageHistoryIndex.ResultColumns);
+    }
+
+    [Fact]
+    public void NgramIndexDdls_DropAndCreateNgramOnEachCompanion()
+    {
+        List<(string Drop, string Create)> ddls = [.. ImageHistoryIndex.NgramIndexDdls("t")];
+        Assert.Equal(ImageHistoryIndex.LowercaseSearchColumns.Count, ddls.Count);
+        Assert.Contains(ddls, d => d.Create == "CREATE INDEX prompt__lc_idx ON t (prompt__lc) USING NGRAM;");
+        Assert.Contains(ddls, d => d.Drop == "DROP INDEX prompt__lc_idx ON t;");
+    }
+
     [Theory]
     [InlineData("alice", "alice")]
     [InlineData("user.1-x", "user.1-x")]

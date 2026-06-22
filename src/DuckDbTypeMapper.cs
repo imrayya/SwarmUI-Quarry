@@ -28,18 +28,28 @@ public static class DuckDbTypeMapper
         "DECIMAL", "NUMERIC",
     };
 
-    public static bool IsNumeric(string duckDbType)
+    private static readonly HashSet<string> IntegerTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "TINYINT", "INT1",
+        "SMALLINT", "INT2", "SHORT",
+        "INTEGER", "INT", "INT4", "SIGNED",
+        "BIGINT", "INT8", "LONG",
+        "HUGEINT",
+        "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT",
+    };
+
+    public static bool IsNumeric(string duckDbType) => BaseTypeName(duckDbType) is { } name && NumericTypes.Contains(name);
+
+    public static bool IsIntegerType(string duckDbType) => BaseTypeName(duckDbType) is { } name && IntegerTypes.Contains(name);
+
+    private static string BaseTypeName(string duckDbType)
     {
         if (string.IsNullOrWhiteSpace(duckDbType) || MapKind(duckDbType) == ColumnKind.List)
         {
-            return false;
+            return null;
         }
         string type = duckDbType.Trim();
         int paren = type.IndexOf('(');
-        if (paren >= 0)
-        {
-            type = type[..paren].Trim();
-        }
-        return NumericTypes.Contains(type);
+        return paren >= 0 ? type[..paren].Trim() : type;
     }
 }

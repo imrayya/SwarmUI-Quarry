@@ -207,7 +207,7 @@ public static class DatasetManager
                     {
                     }
                 }
-                result.Add(new DatasetInfo(entry.Name, [.. schema.Columns], resolved, GetConfiguredPromptColumn(entry.Name), [.. GetConfiguredTagColumns(entry.Name)], rowCount, null));
+                result.Add(new DatasetInfo(entry.Name, [.. schema.VisibleColumns], resolved, GetConfiguredPromptColumn(entry.Name), [.. GetConfiguredTagColumns(entry.Name)], rowCount, null));
             }
             catch (Exception ex)
             {
@@ -261,6 +261,7 @@ public static class DatasetManager
                     return settled;
                 }
                 (List<string> columns, List<List<string>> rows) = Backend.GetSampleRows(entry.Path, limit);
+                (columns, rows) = ColumnSchema.StripCompanions(columns, rows);
                 DatasetCache.PreviewData fresh = new(limit, columns, rows);
                 DatasetCache.StorePreview(key, entry.FileHash, fresh);
                 return fresh;

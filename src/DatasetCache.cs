@@ -8,7 +8,7 @@ namespace Quarry;
 
 public static class DatasetCache
 {
-    private const int CacheVersion = 2;
+    private const int CacheVersion = 4;
     private static readonly ConcurrentDictionary<string, CacheEntry> Cache = new();
     private static readonly ConcurrentDictionary<string, long> FilteredCounts = new();
     private static readonly object CacheLock = new();
@@ -244,7 +244,14 @@ public static class DatasetCache
                 JArray columns = [];
                 foreach (ColumnInfo column in entry.Schema.Columns)
                 {
-                    columns.Add(new JObject { ["name"] = column.Name, ["kind"] = column.Kind.ToString(), ["numeric"] = column.IsNumeric });
+                    columns.Add(new JObject
+                    {
+                        ["name"] = column.Name,
+                        ["kind"] = column.Kind.ToString(),
+                        ["numeric"] = column.IsNumeric,
+                        ["ngram"] = column.HasNgramIndex,
+                        ["numericType"] = column.NumericType,
+                    });
                 }
                 obj["schema"] = columns;
             }
@@ -350,7 +357,9 @@ public static class DatasetCache
                 ? ColumnKind.List
                 : ColumnKind.Scalar;
             bool numeric = token.Value<bool?>("numeric") ?? false;
-            result.Add(new ColumnInfo(name, kind, numeric));
+            bool ngram = token.Value<bool?>("ngram") ?? false;
+            string numericType = token.Value<string>("numericType");
+            result.Add(new ColumnInfo(name, kind, numeric, hasNgramIndex: ngram, numericType: numericType));
         }
         return new ColumnSchema(result);
     }

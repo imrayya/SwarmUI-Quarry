@@ -8,6 +8,7 @@ public sealed record ImageSearchResult(bool HasIndex, List<string> Columns, List
 public static class ImageHistorySearch
 {
     private static readonly ConcurrentDictionary<string, List<string>> DiscoveredCache = new();
+    private static readonly ConcurrentDictionary<string, ColumnSchema> SchemaCache = new();
 
     private static readonly HashSet<string> Sortable =
         new(ImageHistoryIndex.ResultColumns, StringComparer.OrdinalIgnoreCase);
@@ -19,7 +20,9 @@ public static class ImageHistorySearch
             return new ImageSearchResult(false, [], [], 0);
         }
         string lancePath = ImageHistoryIndex.LancePathFor(userId);
-        SqlFilter filter = ImageSearchFilterBuilder.Build(filters);
+        ColumnSchema schema = SchemaCache.GetOrAdd(
+            ImageHistoryIndex.SafeUserSegment(userId), _ => DatasetManager.Backend.GetSchema(lancePath));
+        SqlFilter filter = ImageSearchFilterBuilder.Build(filters, schema);
         string sortColumn = ResolveSort(sortBy);
         (List<string> columns, List<List<string>> rows) =
             DatasetManager.Backend.GetFilteredRows(lancePath, ImageHistoryIndex.ResultColumns, filter, sortColumn, sortDescending, limit, offset);
@@ -33,7 +36,11 @@ public static class ImageHistorySearch
         => (ImageHistoryIndex.CoreFields, Discovered(userId));
 
     public static void InvalidateFields(string userId)
-        => DiscoveredCache.TryRemove(ImageHistoryIndex.SafeUserSegment(userId), out _);
+    {
+        string key = ImageHistoryIndex.SafeUserSegment(userId);
+        DiscoveredCache.TryRemove(key, out _);
+        SchemaCache.TryRemove(key, out _);
+    }
 
     private static List<string> Discovered(string userId)
     {

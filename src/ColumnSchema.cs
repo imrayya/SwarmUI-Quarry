@@ -6,17 +6,21 @@ public enum ColumnKind
     List,
 }
 
-public sealed class ColumnInfo(string name, ColumnKind kind, bool isNumeric = false)
+public sealed class ColumnInfo(string name, ColumnKind kind, bool isNumeric = false, bool hasNgramIndex = false, string numericType = null)
 {
     public string Name { get; } = name;
     public ColumnKind Kind { get; } = kind;
     public bool IsNumeric { get; } = isNumeric;
+    public bool HasNgramIndex { get; } = hasNgramIndex;
+    public string NumericType { get; } = numericType;
 }
 
 public sealed class ColumnSchema
 {
+    public const string CompanionSuffix = "__lc";
     private readonly List<ColumnInfo> _ordered;
     private readonly Dictionary<string, ColumnInfo> _byName;
+    private IReadOnlyList<ColumnInfo> _visible;
 
     public ColumnSchema(IEnumerable<ColumnInfo> columns)
     {
@@ -30,5 +34,41 @@ public sealed class ColumnSchema
 
     public IReadOnlyList<ColumnInfo> Columns => _ordered;
 
+    public IReadOnlyList<ColumnInfo> VisibleColumns =>
+        _visible ??= _ordered.Any(c => IsCompanionName(c.Name))
+            ? [.. _ordered.Where(c => !IsCompanionName(c.Name))]
+            : _ordered;
+
+    public bool IsCompanionName(string name)
+        => name.Length > CompanionSuffix.Length
+            && name.EndsWith(CompanionSuffix, StringComparison.OrdinalIgnoreCase)
+            && _byName.ContainsKey(name[..^CompanionSuffix.Length]);
+
     public bool TryGet(string column, out ColumnInfo info) => _byName.TryGetValue(column, out info);
+
+    public static (List<string> Columns, List<List<string>> Rows) StripCompanions(List<string> columns, List<List<string>> rows)
+    {
+        HashSet<string> names = new(columns, StringComparer.OrdinalIgnoreCase);
+        bool[] keep = new bool[columns.Count];
+        bool anyDropped = false;
+        for (int i = 0; i < columns.Count; i++)
+        {
+            bool companion = columns[i].Length > CompanionSuffix.Length
+                && columns[i].EndsWith(CompanionSuffix, StringComparison.OrdinalIgnoreCase)
+                && names.Contains(columns[i][..^CompanionSuffix.Length]);
+            keep[i] = !companion;
+            anyDropped |= companion;
+        }
+        if (!anyDropped)
+        {
+            return (columns, rows);
+        }
+        List<string> keptColumns = [.. columns.Where((_, i) => keep[i])];
+        List<List<string>> keptRows = [];
+        foreach (List<string> row in rows)
+        {
+            keptRows.Add([.. row.Where((_, i) => i < keep.Length && keep[i])]);
+        }
+        return (keptColumns, keptRows);
+    }
 }

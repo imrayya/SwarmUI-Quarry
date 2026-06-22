@@ -77,18 +77,41 @@ public static class ImageHistoryIndex
     public static readonly IReadOnlyList<string> ResultColumns =
         [.. Schema.Select(c => c.Name).Where(n => n != MetaJsonColumn)];
 
+    public static readonly IReadOnlyList<string> LowercaseSearchColumns =
+        ["prompt", "negativeprompt", "original_prompt", "model", "sampler"];
+
+    public static string LcColumn(string column) => column + ColumnSchema.CompanionSuffix;
+
+    private static readonly string LcColumnDefs =
+        string.Concat(LowercaseSearchColumns.Select(c => $", {LcColumn(c)} VARCHAR"));
+
     public static string CreateTableSql(string tableRef)
-        => $"CREATE TABLE {tableRef} ({string.Join(", ", Schema.Select(c => $"{c.Name} {c.DdlType}"))});";
+        => $"CREATE TABLE {tableRef} ({string.Join(", ", Schema.Select(c => $"{c.Name} {c.DdlType}"))}{LcColumnDefs});";
 
     public static string MergeUpsertSql(string tableRef, string stagingJsonLiteral)
     {
-        string setList = string.Join(", ", Schema.Where(c => c.Name != PathColumn).Select(c => $"{c.Name} = s.{c.Name}"));
-        string valList = string.Join(", ", Schema.Select(c => $"s.{c.Name}"));
+        string lcSourceSelect = string.Concat(LowercaseSearchColumns.Select(c => $", lower({c}) AS {LcColumn(c)}"));
+        string insertCols = ColumnNames + string.Concat(LowercaseSearchColumns.Select(c => $", {LcColumn(c)}"));
+        string setList = string.Join(", ",
+            Schema.Where(c => c.Name != PathColumn).Select(c => $"{c.Name} = s.{c.Name}")
+                .Concat(LowercaseSearchColumns.Select(c => $"{LcColumn(c)} = s.{LcColumn(c)}")));
+        string valList = string.Join(", ",
+            Schema.Select(c => $"s.{c.Name}")
+                .Concat(LowercaseSearchColumns.Select(c => $"s.{LcColumn(c)}")));
         return $"MERGE INTO {tableRef} AS t "
-            + $"USING (SELECT {ColumnNames} FROM read_json({stagingJsonLiteral}, format='array', columns={ReadJsonColumnsSpec})) AS s "
+            + $"USING (SELECT {ColumnNames}{lcSourceSelect} FROM read_json({stagingJsonLiteral}, format='array', columns={ReadJsonColumnsSpec})) AS s "
             + $"ON t.{PathColumn} = s.{PathColumn} "
             + $"WHEN MATCHED THEN UPDATE SET {setList} "
-            + $"WHEN NOT MATCHED THEN INSERT ({ColumnNames}) VALUES ({valList});";
+            + $"WHEN NOT MATCHED THEN INSERT ({insertCols}) VALUES ({valList});";
+    }
+
+    public static IEnumerable<(string Drop, string Create)> NgramIndexDdls(string tableRef)
+    {
+        foreach (string col in LowercaseSearchColumns)
+        {
+            string lc = LcColumn(col);
+            yield return ($"DROP INDEX {lc}_idx ON {tableRef};", $"CREATE INDEX {lc}_idx ON {tableRef} ({lc}) USING NGRAM;");
+        }
     }
 
     public static string MergePruneSql(string tableRef, string livePathsJsonLiteral)

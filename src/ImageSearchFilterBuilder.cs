@@ -21,7 +21,9 @@ public static class ImageSearchFilterBuilder
             ],
         };
 
-    public static SqlFilter Build(JArray filters)
+    public static SqlFilter Build(JArray filters) => Build(filters, null);
+
+    public static SqlFilter Build(JArray filters, ColumnSchema schema)
     {
         if (filters is null || filters.Count == 0)
         {
@@ -42,7 +44,7 @@ public static class ImageSearchFilterBuilder
             {
                 continue;
             }
-            string term = BuildTerm(field.Trim(), op.Trim(), value, parameters);
+            string term = BuildTerm(field.Trim(), op.Trim(), value, parameters, schema);
             if (term is not null)
             {
                 terms.Add(term);
@@ -51,14 +53,14 @@ public static class ImageSearchFilterBuilder
         return terms.Count == 0 ? SqlFilter.None : new SqlFilter(string.Join(" AND ", terms), parameters);
     }
 
-    private static string BuildTerm(string field, string op, string value, List<QueryParameter> parameters)
+    private static string BuildTerm(string field, string op, string value, List<QueryParameter> parameters, ColumnSchema schema)
     {
         if (ImageHistoryIndex.CoreFieldTypes.TryGetValue(field, out ImageFieldType type))
         {
             string column = SqlText.QuoteIdentifier(field);
             return type switch
             {
-                ImageFieldType.Text => TextTerm(column, op, value, parameters),
+                ImageFieldType.Text => TextTerm(TextMatchColumn(field, value, schema), op, value, parameters),
                 ImageFieldType.Number => NumberTerm(column, op, value, parameters),
                 ImageFieldType.List => ListTerm(column, op, value, parameters),
                 ImageFieldType.Bool => BoolTerm(column, op),
@@ -73,24 +75,36 @@ public static class ImageSearchFilterBuilder
         string textExpr = $"json_extract_string({SqlText.QuoteIdentifier(ImageHistoryIndex.MetaJsonColumn)}, {path})";
         return IsNumericOp(op)
             ? NumberTerm($"TRY_CAST({textExpr} AS DOUBLE)", op, value, parameters)
-            : TextTerm(textExpr, op, value, parameters);
+            : TextTerm($"lower({textExpr})", op, value, parameters);
     }
 
-    private static string TextTerm(string expr, string op, string value, List<QueryParameter> parameters)
+    private static string TextMatchColumn(string field, string value, ColumnSchema schema)
     {
-        string template = op switch
+        string scan = $"lower({SqlText.QuoteIdentifier(field)})";
+        if (value.Length < SqlFilterBuilder.NgramMinLength)
         {
-            "contains" => "contains(lower({0}), lower({1}))",
-            "equals" or "eq" => "lower({0}) = lower({1})",
-            "ne" => "lower({0}) != lower({1})",
-            "not_contains" => "NOT contains(lower({0}), lower({1}))",
-            _ => null,
-        };
-        if (template is null)
+            return scan;
+        }
+        return schema is not null && schema.TryGet(field, out ColumnInfo column)
+            ? SqlFilterBuilder.SearchColumn(column, schema)
+            : scan;
+    }
+
+    private static string TextTerm(string matchColumn, string op, string value, List<QueryParameter> parameters)
+    {
+        if (op is not ("contains" or "equals" or "eq" or "ne" or "not_contains"))
         {
             return null;
         }
-        return string.Format(template, expr, AddParam(parameters, value));
+        string p = AddParam(parameters, value.ToLowerInvariant());
+        return op switch
+        {
+            "contains" => $"contains({matchColumn}, {p})",
+            "equals" or "eq" => $"{matchColumn} = {p}",
+            "ne" => $"{matchColumn} != {p}",
+            "not_contains" => $"NOT contains({matchColumn}, {p})",
+            _ => null,
+        };
     }
 
     private static string NumberTerm(string expr, string op, string value, List<QueryParameter> parameters)
@@ -122,7 +136,7 @@ public static class ImageSearchFilterBuilder
         {
             return null;
         }
-        string contains = $"len(list_filter({column}, x -> contains(lower(x), lower({AddParam(parameters, value)})))) > 0";
+        string contains = $"len(list_filter({column}, x -> contains(lower(x), {AddParam(parameters, value.ToLowerInvariant())}))) > 0";
         return op == "contains" ? contains : $"NOT ({contains})";
     }
 

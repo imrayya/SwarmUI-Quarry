@@ -74,4 +74,34 @@ public class DuckDbTypeMapperTests
     {
         Assert.False(DuckDbTypeMapper.IsNumeric(type));
     }
+
+    [Theory]
+    [InlineData("TINYINT")]
+    [InlineData("SMALLINT")]
+    [InlineData("INTEGER")]
+    [InlineData("BIGINT")]
+    [InlineData("HUGEINT")]
+    [InlineData("UTINYINT")]
+    [InlineData("UBIGINT")]
+    [InlineData("integer")]
+    [InlineData("  BIGINT  ")]
+    public void IntegerTypes(string type)
+    {
+        Assert.True(DuckDbTypeMapper.IsIntegerType(type));
+    }
+
+    [Theory]
+    [InlineData("FLOAT")]   // floats keep fractions, so they are not "integer" for bound rounding
+    [InlineData("DOUBLE")]
+    [InlineData("REAL")]
+    [InlineData("DECIMAL(10,2)")]
+    [InlineData("NUMERIC")]
+    [InlineData("VARCHAR")]
+    [InlineData("INTEGER[]")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void NonIntegerTypes(string type)
+    {
+        Assert.False(DuckDbTypeMapper.IsIntegerType(type));
+    }
 }

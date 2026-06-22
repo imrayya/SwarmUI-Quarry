@@ -79,19 +79,64 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
         public ColumnSchema GetSchema(string datasetPath)
         {
             DatasetSource source = PrepareSource(datasetPath);
-            using DuckDBCommand cmd = _connection.CreateCommand();
-            cmd.CommandText = $"DESCRIBE SELECT * FROM {source.FromExpression};";
-            using DuckDBDataReader reader = cmd.ExecuteReader();
-            int nameOrdinal = reader.GetOrdinal("column_name");
-            int typeOrdinal = reader.GetOrdinal("column_type");
-            List<ColumnInfo> columns = [];
-            while (reader.Read())
+            List<(string Name, string Type)> described = [];
+            using (DuckDBCommand cmd = _connection.CreateCommand())
             {
-                string name = reader.GetString(nameOrdinal);
-                string type = reader.GetString(typeOrdinal);
-                columns.Add(new ColumnInfo(name, DuckDbTypeMapper.MapKind(type), DuckDbTypeMapper.IsNumeric(type)));
+                cmd.CommandText = $"DESCRIBE SELECT * FROM {source.FromExpression};";
+                using DuckDBDataReader reader = cmd.ExecuteReader();
+                int nameOrdinal = reader.GetOrdinal("column_name");
+                int typeOrdinal = reader.GetOrdinal("column_type");
+                while (reader.Read())
+                {
+                    described.Add((reader.GetString(nameOrdinal), reader.GetString(typeOrdinal)));
+                }
+            }
+            HashSet<string> ngram = source.RequiresLance
+                ? GetNgramIndexedColumns(source)
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            List<ColumnInfo> columns = [];
+            foreach ((string name, string type) in described)
+            {
+                bool numeric = DuckDbTypeMapper.IsNumeric(type);
+                columns.Add(new ColumnInfo(
+                    name,
+                    DuckDbTypeMapper.MapKind(type),
+                    numeric,
+                    hasNgramIndex: ngram.Contains(name),
+                    numericType: numeric ? type : null));
             }
             return new ColumnSchema(columns);
+        }
+
+        private HashSet<string> GetNgramIndexedColumns(DatasetSource source)
+        {
+            HashSet<string> result = new(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using DuckDBCommand cmd = _connection.CreateCommand();
+                cmd.CommandText = $"SHOW INDEXES ON {source.FromExpression};";
+                using DuckDBDataReader reader = cmd.ExecuteReader();
+                int typeOrdinal = reader.GetOrdinal("index_type");
+                int fieldsOrdinal = reader.GetOrdinal("fields");
+                while (reader.Read())
+                {
+                    string type = reader.IsDBNull(typeOrdinal) ? "" : reader.GetValue(typeOrdinal)?.ToString() ?? "";
+                    if (!string.Equals(type, "NGram", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    string fields = reader.IsDBNull(fieldsOrdinal) ? "" : reader.GetValue(fieldsOrdinal)?.ToString() ?? "";
+                    foreach (string field in fields.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    {
+                        result.Add(field.Trim('[', ']', '"', ' '));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logs.Debug($"Quarry: SHOW INDEXES failed for {source.FromExpression}: {ex.Message}");
+            }
+            return result;
         }
 
         public long CountRows(string datasetPath, SqlFilter filter)
@@ -152,6 +197,7 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
                 {
                     Execute(ImageHistoryIndex.CreateTableSql(tableRef));
                 }
+                EnsureLowercaseColumns(tableRef);
                 if (stagingJsonPaths is not null)
                 {
                     foreach (string stagingJsonPath in stagingJsonPaths)
@@ -163,6 +209,7 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
                 {
                     Execute(ImageHistoryIndex.MergePruneSql(tableRef, SqlText.QuoteLiteral(livePathsJsonPath)));
                 }
+                BuildNgramIndexes(tableRef);
             }
             finally
             {
@@ -179,7 +226,56 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
         }
 
         private static int _writeCount;
+        private static int _ngramBuildCount;
         private static bool _maintenanceDisabled;
+
+        private void EnsureLowercaseColumns(string tableRef)
+        {
+            HashSet<string> existing = new(StringComparer.OrdinalIgnoreCase);
+            using (DuckDBCommand cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = $"SELECT * FROM {tableRef} LIMIT 0;";
+                using DuckDBDataReader reader = cmd.ExecuteReader();
+                for (int i = 0; i < reader.FieldCount; i++)
+                {
+                    existing.Add(reader.GetName(i));
+                }
+            }
+            foreach (string col in ImageHistoryIndex.LowercaseSearchColumns)
+            {
+                string lc = ImageHistoryIndex.LcColumn(col);
+                if (existing.Contains(lc))
+                {
+                    continue;
+                }
+                Execute($"ALTER TABLE {tableRef} ADD COLUMN {lc} VARCHAR;");
+                Execute($"UPDATE {tableRef} SET {lc} = lower({col});");
+            }
+        }
+
+        private void BuildNgramIndexes(string tableRef)
+        {
+            bool refresh = Interlocked.Increment(ref _ngramBuildCount) % 5 == 1;
+            foreach ((string drop, string create) in ImageHistoryIndex.NgramIndexDdls(tableRef))
+            {
+                if (refresh)
+                {
+                    try { Execute(drop); } catch { /* index may not exist yet */ }
+                }
+                try
+                {
+                    Execute(create);
+                }
+                catch (Exception ex) when (ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Expected on the writes between periodic refreshes -- the index is already there.
+                }
+                catch (Exception ex)
+                {
+                    Logs.Debug($"Quarry: image-history NGRAM index build failed: {ex.Message}");
+                }
+            }
+        }
 
         private void MaybeCompact(string lancePath)
         {
