@@ -6,6 +6,7 @@ namespace Quarry;
 public static class DatasetWarmer
 {
     private static int Parallelism => Math.Clamp(Environment.ProcessorCount / 2, 2, 6);
+    private static readonly SingleFlight<string, bool> _warmFlight = new(StringComparer.Ordinal);
 
     public static int WarmAll(DuckDbQueryBackend backend, IReadOnlyCollection<DatasetEntry> datasets, int previewLimit)
     {
@@ -30,26 +31,43 @@ public static class DatasetWarmer
         {
             return;
         }
-        if (misses.Count == 1)
+        string flightKey = string.Join("\n",
+            misses.Select(miss => DatasetCache.FilteredCountKey(miss.Entry, miss.Filter)).OrderBy(key => key, StringComparer.Ordinal));
+        _warmFlight.GetOrBuild(flightKey, () =>
+        {
+            RunWarm(backend, misses);
+            return true;
+        });
+    }
+
+    private static void RunWarm(DuckDbQueryBackend backend, List<(DatasetEntry Entry, SqlFilter Filter)> misses)
+    {
+        List<(DatasetEntry Entry, SqlFilter Filter)> pending = [.. misses.Where(miss =>
+            !DatasetCache.TryGetFilteredCount(DatasetCache.FilteredCountKey(miss.Entry, miss.Filter), out _))];
+        if (pending.Count == 0)
+        {
+            return;
+        }
+        if (pending.Count == 1)
         {
             try
             {
-                DatasetManager.CountRowsFiltered(misses[0].Entry, misses[0].Filter);
+                DatasetManager.CountRowsFiltered(pending[0].Entry, pending[0].Filter);
             }
             catch (Exception ex)
             {
-                Logs.Debug($"Quarry: filtered count failed for '{misses[0].Entry.Name}': {ex.Message}");
+                Logs.Debug($"Quarry: filtered count failed for '{pending[0].Entry.Name}': {ex.Message}");
             }
             return;
         }
         List<Action<IDatasetReader>> jobs = [];
-        foreach ((DatasetEntry entry, SqlFilter filter) in misses)
+        foreach ((DatasetEntry entry, SqlFilter filter) in pending)
         {
             jobs.Add(reader =>
             {
                 try
                 {
-                    DatasetCache.StoreFilteredCount(DatasetCache.FilteredCountKey(entry, filter), reader.CountRows(entry.Path, filter));
+                    DatasetManager.CountRowsFiltered(entry, filter, reader);
                 }
                 catch (Exception ex)
                 {
@@ -57,7 +75,14 @@ public static class DatasetWarmer
                 }
             });
         }
-        backend.RunPooled(jobs, Parallelism);
+        try
+        {
+            backend.RunPooled(jobs, Parallelism);
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"Quarry: filtered count fan-out failed: {ex.Message}");
+        }
         DatasetCache.PersistIfDirty();
     }
 

@@ -6,12 +6,22 @@ namespace Quarry;
 
 public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
 {
+    private const int ScanThreadsPerConnection = 2;
+    private const string ScanMemoryLimit = "2GB";
+    private static readonly int MaxConcurrentScanConnections = Math.Clamp(Environment.ProcessorCount / 2, 4, 12);
+    private static readonly SemaphoreSlim _scanGate = new(MaxConcurrentScanConnections, MaxConcurrentScanConnections);
+
     private sealed class Conn : IDatasetReader, IDisposable
     {
         private DuckDBConnection _connection;
         private bool _lanceLoaded;
+        private readonly bool _forScan;
 
-        public Conn() => Open();
+        public Conn(bool forScan = false)
+        {
+            _forScan = forScan;
+            Open();
+        }
 
         private void Open()
         {
@@ -19,7 +29,16 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
             try
             {
                 conn.Open();
-                ExecuteOn(conn, "SET preserve_insertion_order = true;");
+                if (_forScan)
+                {
+                    ExecuteOn(conn, "SET preserve_insertion_order = false;");
+                    ExecuteOn(conn, $"SET threads = {ScanThreadsPerConnection};");
+                    ExecuteOn(conn, $"SET memory_limit = '{ScanMemoryLimit}';");
+                }
+                else
+                {
+                    ExecuteOn(conn, "SET preserve_insertion_order = true;");
+                }
                 string extensionDirectory = ResolveExtensionDirectory();
                 if (extensionDirectory is not null)
                 {
@@ -397,19 +416,34 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
         }
         int workers = Math.Clamp(maxParallelism, 1, jobs.Count);
         ConcurrentQueue<Action<IDatasetReader>> queue = new(jobs);
-        Task[] tasks = new Task[workers];
-        for (int i = 0; i < workers; i++)
+        Task[] tasks = new Task[workers - 1];
+        for (int i = 0; i < tasks.Length; i++)
         {
-            tasks[i] = Task.Run(() =>
-            {
-                using Conn conn = new();
-                while (queue.TryDequeue(out Action<IDatasetReader> job))
-                {
-                    job(conn);
-                }
-            });
+            tasks[i] = Task.Run(() => DrainQueue(queue));
         }
+        DrainQueue(queue);
         Task.WaitAll(tasks);
+    }
+
+    private static void DrainQueue(ConcurrentQueue<Action<IDatasetReader>> queue)
+    {
+        if (queue.IsEmpty)
+        {
+            return;
+        }
+        _scanGate.Wait();
+        try
+        {
+            using Conn conn = new(forScan: true);
+            while (queue.TryDequeue(out Action<IDatasetReader> job))
+            {
+                job(conn);
+            }
+        }
+        finally
+        {
+            _scanGate.Release();
+        }
     }
 
     private static (List<string> Columns, List<List<string>> Rows) Drain(DuckDBDataReader reader)

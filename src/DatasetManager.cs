@@ -162,6 +162,25 @@ public static class DatasetManager
         return count;
     }
 
+    public static long CountRowsFiltered(DatasetEntry entry, SqlFilter filter, IDatasetReader reader)
+    {
+        string key = DatasetCache.FilteredCountKey(entry, filter);
+        if (DatasetCache.TryGetFilteredCount(key, out long cached))
+        {
+            return cached;
+        }
+        return _filteredCountFlight.GetOrBuild(key, () =>
+        {
+            if (DatasetCache.TryGetFilteredCount(key, out long settled))
+            {
+                return settled;
+            }
+            long built = reader.CountRows(entry.Path, filter);
+            DatasetCache.StoreFilteredCount(key, built);
+            return built;
+        });
+    }
+
     public static void WarmFilteredCounts(IReadOnlyList<(DatasetEntry Entry, SqlFilter Filter)> requests)
         => DatasetWarmer.WarmFilteredCounts(Backend, requests);
 
