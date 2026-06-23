@@ -249,7 +249,13 @@ public static class DatasetManager
         string key = entry.Name.ToLowerFast();
         if (DatasetCache.TryGetPreview(key, entry.FileHash, limit, out DatasetCache.PreviewData cached))
         {
-            return (true, cached.Columns, cached.Rows, null);
+            DatasetCache.PreviewData visible = StripInternalPreviewColumns(cached);
+            if (!ReferenceEquals(visible, cached))
+            {
+                DatasetCache.StorePreview(key, entry.FileHash, visible);
+                DatasetCache.PersistIfDirty();
+            }
+            return (true, visible.Columns, visible.Rows, null);
         }
         try
         {
@@ -258,7 +264,7 @@ public static class DatasetManager
             {
                 if (DatasetCache.TryGetPreview(key, entry.FileHash, limit, out DatasetCache.PreviewData settled))
                 {
-                    return settled;
+                    return StripInternalPreviewColumns(settled);
                 }
                 (List<string> columns, List<List<string>> rows) = Backend.GetSampleRows(entry.Path, limit);
                 (columns, rows) = ColumnSchema.StripCompanions(columns, rows);
@@ -266,6 +272,8 @@ public static class DatasetManager
                 DatasetCache.StorePreview(key, entry.FileHash, fresh);
                 return fresh;
             });
+            data = StripInternalPreviewColumns(data);
+            DatasetCache.StorePreview(key, entry.FileHash, data);
             DatasetCache.PersistIfDirty();
             return (true, data.Columns, data.Rows, null);
         }
@@ -273,6 +281,12 @@ public static class DatasetManager
         {
             return (false, null, null, ex.Message);
         }
+    }
+
+    private static DatasetCache.PreviewData StripInternalPreviewColumns(DatasetCache.PreviewData preview)
+    {
+        (List<string> columns, List<List<string>> rows) = ColumnSchema.StripCompanions(preview.Columns, preview.Rows);
+        return ReferenceEquals(columns, preview.Columns) ? preview : new DatasetCache.PreviewData(preview.Limit, columns, rows);
     }
 
     public static bool ClearPreviewCache(string name)

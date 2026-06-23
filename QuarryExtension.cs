@@ -258,6 +258,7 @@ public class QuarryExtension : Extension
         {
             return Task.FromResult(new JObject { ["success"] = false, ["error"] = error });
         }
+        (columns, rows) = ColumnSchema.StripCompanions(columns, rows);
         JObject response = new()
         {
             ["success"] = true,

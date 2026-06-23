@@ -21,12 +21,11 @@ public class ColumnSchemaTests
     }
 
     [Fact]
-    public void IsCompanionName_RequiresAnExistingBaseColumn()
+    public void IsCompanionName_HidesInternalColumnWithoutBaseColumn()
     {
         ColumnSchema schema = new([new ColumnInfo("notes__lc", ColumnKind.Scalar)]);
-        // "notes__lc" with no "notes" base is a genuine column, not a companion -> not hidden.
-        Assert.False(schema.IsCompanionName("notes__lc"));
-        Assert.Equal(new[] { "notes__lc" }, schema.VisibleColumns.Select(c => c.Name));
+        Assert.True(schema.IsCompanionName("notes__lc"));
+        Assert.Empty(schema.VisibleColumns);
     }
 
     [Fact]
@@ -67,12 +66,12 @@ public class ColumnSchemaTests
     }
 
     [Fact]
-    public void StripCompanions_KeepsCompanionWhenBaseColumnIsAbsent()
+    public void StripCompanions_DropsInternalColumnWhenBaseColumnIsAbsent()
     {
-        // "notes__lc" with no "notes" column present is a real column, so it must survive.
         List<string> columns = ["notes__lc", "n"];
         List<List<string>> rows = [["hello", "1"]];
-        (List<string> cols, _) = ColumnSchema.StripCompanions(columns, rows);
-        Assert.Equal(new[] { "notes__lc", "n" }, cols);
+        (List<string> cols, List<List<string>> outRows) = ColumnSchema.StripCompanions(columns, rows);
+        Assert.Equal(new[] { "n" }, cols);
+        Assert.Equal(new[] { "1" }, outRows[0]);
     }
 }

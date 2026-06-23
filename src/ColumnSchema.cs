@@ -41,21 +41,18 @@ public sealed class ColumnSchema
 
     public bool IsCompanionName(string name)
         => name.Length > CompanionSuffix.Length
-            && name.EndsWith(CompanionSuffix, StringComparison.OrdinalIgnoreCase)
-            && _byName.ContainsKey(name[..^CompanionSuffix.Length]);
+            && name.EndsWith(CompanionSuffix, StringComparison.OrdinalIgnoreCase);
 
     public bool TryGet(string column, out ColumnInfo info) => _byName.TryGetValue(column, out info);
 
     public static (List<string> Columns, List<List<string>> Rows) StripCompanions(List<string> columns, List<List<string>> rows)
     {
-        HashSet<string> names = new(columns, StringComparer.OrdinalIgnoreCase);
         bool[] keep = new bool[columns.Count];
         bool anyDropped = false;
         for (int i = 0; i < columns.Count; i++)
         {
             bool companion = columns[i].Length > CompanionSuffix.Length
-                && columns[i].EndsWith(CompanionSuffix, StringComparison.OrdinalIgnoreCase)
-                && names.Contains(columns[i][..^CompanionSuffix.Length]);
+                && columns[i].EndsWith(CompanionSuffix, StringComparison.OrdinalIgnoreCase);
             keep[i] = !companion;
             anyDropped |= companion;
         }
