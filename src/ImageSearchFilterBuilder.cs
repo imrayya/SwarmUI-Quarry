@@ -10,9 +10,9 @@ public static class ImageSearchFilterBuilder
     public static readonly IReadOnlyDictionary<string, IReadOnlyList<ImageSearchOperator>> OperatorsByType =
         new Dictionary<string, IReadOnlyList<ImageSearchOperator>>(StringComparer.OrdinalIgnoreCase)
         {
-            ["text"] = [new("=", "="), new("==", "=="), new("!=", "!=")],
+            ["text"] = [new("=", "="), new("==", "=="), new("!=", "!="), new("+=", "+="), new("-=", "-=")],
             ["number"] = [new("=", "="), new("==", "=="), new("!=", "!="), new("+=", "+="), new("-=", "-=")],
-            ["list"] = [new("=", "="), new("==", "=="), new("!=", "!=")],
+            ["list"] = [new("=", "="), new("==", "=="), new("!=", "!="), new("+=", "+="), new("-=", "-=")],
             ["bool"] = [new("is_true", "is set"), new("is_false", "is not set")],
             ["discovered"] = [new("=", "="), new("==", "=="), new("!=", "!="), new("+=", "+="), new("-=", "-=")],
         };
@@ -56,12 +56,17 @@ public static class ImageSearchFilterBuilder
     {
         if (ImageHistoryIndex.CoreFieldTypes.TryGetValue(field, out ImageFieldType type))
         {
-            if (op is "+=" or "-=" && type != ImageFieldType.Number)
-            {
-                warnings.Add($"The “{op}” filter only works on number fields, so it was skipped for “{FieldLabel(field)}”.");
-                return null;
-            }
             string column = SqlText.QuoteIdentifier(field);
+            if (op is "+=" or "-=")
+            {
+                return type switch
+                {
+                    ImageFieldType.Number => NumberTerm(column, op, value, parameters),
+                    ImageFieldType.Text => WarnNonNumeric(field, op, NumberTerm($"TRY_CAST({column} AS DOUBLE)", op, value, parameters), warnings),
+                    ImageFieldType.List => WarnNonNumeric(field, op, NumberListTerm(column, op, value, parameters), warnings),
+                    _ => WarnUnsupportedNumeric(field, op, warnings),
+                };
+            }
             return type switch
             {
                 ImageFieldType.Text => TextTerm(v => TextMatchColumn(field, v, schema), op, value, parameters),
@@ -136,6 +141,24 @@ public static class ImageSearchFilterBuilder
             return null;
         }
         return $"{expr} {comparison} CAST({AddParam(parameters, value)} AS DOUBLE)";
+    }
+
+    private static string NumberListTerm(string column, string op, string value, List<QueryParameter> parameters)
+    {
+        string inner = NumberTerm("TRY_CAST(x AS DOUBLE)", op, value, parameters);
+        return inner is null ? null : $"len(list_filter({column}, x -> {inner})) > 0";
+    }
+
+    private static string WarnNonNumeric(string field, string op, string term, List<string> warnings)
+    {
+        warnings.Add($"“{FieldLabel(field)}” isn’t a number field, so “{op}” compares it numerically and only matches rows whose value is a number.");
+        return term;
+    }
+
+    private static string WarnUnsupportedNumeric(string field, string op, List<string> warnings)
+    {
+        warnings.Add($"“{op}” can’t be used on “{FieldLabel(field)}”, so it was skipped.");
+        return null;
     }
 
     private static string ListTerm(string column, string op, string value, List<QueryParameter> parameters)

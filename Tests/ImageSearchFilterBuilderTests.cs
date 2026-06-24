@@ -238,23 +238,37 @@ public class ImageSearchFilterBuilderTests
     }
 
     [Fact]
-    public void AtLeastOnTextField_IsDroppedWithAWarning()
+    public void AtLeastOnTextField_CastsNumericallyWithAWarning()
     {
-        // +=/-= are numeric-only. On a known non-numeric column the term is skipped and the user is warned, rather
-        // than silently matching nothing.
+        // +=/-= are offered on every field. On a non-numeric column the value is compared via TRY_CAST -- matching
+        // only rows whose value is a number -- and the user is warned rather than the operator being hidden.
         SqlFilter f = ImageSearchFilterBuilder.Build(
             JArray.Parse("""[{"field":"prompt","op":"+=","value":"5"}]"""), null, out List<string> warnings);
-        Assert.True(f.IsEmpty);
+        Assert.Equal("TRY_CAST(\"prompt\" AS DOUBLE) >= CAST($p0 AS DOUBLE)", f.WhereClause);
+        Assert.Equal("5", f.Parameters[0].Value);
         string warning = Assert.Single(warnings);
         Assert.Contains("Prompt", warning);
         Assert.Contains("+=", warning);
     }
 
     [Fact]
-    public void AtMostOnListField_IsDroppedWithAWarning()
+    public void AtMostOnListField_CastsElementsNumericallyWithAWarning()
     {
+        // On a list column the comparison runs per element, keeping rows where any element parses to a number that
+        // satisfies the bound.
         SqlFilter f = ImageSearchFilterBuilder.Build(
             JArray.Parse("""[{"field":"loras","op":"-=","value":"5"}]"""), null, out List<string> warnings);
+        Assert.Equal("len(list_filter(\"loras\", x -> TRY_CAST(x AS DOUBLE) <= CAST($p0 AS DOUBLE))) > 0", f.WhereClause);
+        Assert.Single(warnings);
+    }
+
+    [Fact]
+    public void NumericOpOnTextField_NonNumericValue_IsDroppedButStillWarns()
+    {
+        // A non-numeric value can't reach CAST(... AS DOUBLE), so the term drops; the non-numeric-field warning still
+        // fires so the user understands why nothing was applied.
+        SqlFilter f = ImageSearchFilterBuilder.Build(
+            JArray.Parse("""[{"field":"prompt","op":"+=","value":"abc"}]"""), null, out List<string> warnings);
         Assert.True(f.IsEmpty);
         Assert.Single(warnings);
     }
@@ -273,11 +287,11 @@ public class ImageSearchFilterBuilderTests
     public void OperatorsByType_AdvertisesExactlyTheOperatorsTheBuilderAccepts()
     {
         // The UI renders its dropdowns from this catalog, so it must list exactly the operators each type supports.
-        Assert.Equal(new[] { "=", "==", "!=" },
+        Assert.Equal(new[] { "=", "==", "!=", "+=", "-=" },
             ImageSearchFilterBuilder.OperatorsByType["text"].Select(o => o.Value));
         Assert.Equal(new[] { "=", "==", "!=", "+=", "-=" },
             ImageSearchFilterBuilder.OperatorsByType["number"].Select(o => o.Value));
-        Assert.Equal(new[] { "=", "==", "!=" },
+        Assert.Equal(new[] { "=", "==", "!=", "+=", "-=" },
             ImageSearchFilterBuilder.OperatorsByType["list"].Select(o => o.Value));
         Assert.Equal(new[] { "is_true", "is_false" },
             ImageSearchFilterBuilder.OperatorsByType["bool"].Select(o => o.Value));
