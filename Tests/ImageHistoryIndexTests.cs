@@ -87,6 +87,31 @@ public class ImageHistoryIndexTests
         Assert.Contains(ddls, d => d.Drop == "DROP INDEX prompt__lc_idx ON t;");
     }
 
+    [Fact]
+    public void BtreeIndexColumns_AreTheDeclaredNumericColumns()
+    {
+        Assert.Equal(
+            new[] { "mtime", "indexed_at", "seed", "steps", "cfgscale", "width", "height" },
+            ImageHistoryIndex.BtreeIndexColumns);
+        // never BTREE the bool, the merge key, or text columns
+        Assert.DoesNotContain("is_starred", ImageHistoryIndex.BtreeIndexColumns);
+        Assert.DoesNotContain("path", ImageHistoryIndex.BtreeIndexColumns);
+        Assert.DoesNotContain("file_hash", ImageHistoryIndex.BtreeIndexColumns);
+        Assert.DoesNotContain("prompt", ImageHistoryIndex.BtreeIndexColumns);
+    }
+
+    [Fact]
+    public void BtreeIndexDdls_DropAndCreateBtreeOnEachNumericColumn()
+    {
+        List<(string Drop, string Create)> ddls = [.. ImageHistoryIndex.BtreeIndexDdls("t")];
+        Assert.Equal(ImageHistoryIndex.BtreeIndexColumns.Count, ddls.Count);
+        Assert.Contains(ddls, d => d.Create == "CREATE INDEX seed_idx ON t (seed) USING BTREE;");
+        Assert.Contains(ddls, d => d.Drop == "DROP INDEX seed_idx ON t;");
+        Assert.Contains(ddls, d => d.Create == "CREATE INDEX cfgscale_idx ON t (cfgscale) USING BTREE;");
+        // BTREE DDLs must never target the lowercase NGRAM companions
+        Assert.DoesNotContain(ddls, d => d.Create.Contains("__lc"));
+    }
+
     [Theory]
     [InlineData("alice", "alice")]
     [InlineData("user.1-x", "user.1-x")]

@@ -209,7 +209,7 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
                 {
                     Execute(ImageHistoryIndex.MergePruneSql(tableRef, SqlText.QuoteLiteral(livePathsJsonPath)));
                 }
-                BuildNgramIndexes(tableRef);
+                BuildScalarIndexes(tableRef);
             }
             finally
             {
@@ -253,10 +253,11 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
             }
         }
 
-        private void BuildNgramIndexes(string tableRef)
+        private void BuildScalarIndexes(string tableRef)
         {
             bool refresh = Interlocked.Increment(ref _ngramBuildCount) % 5 == 1;
-            foreach ((string drop, string create) in ImageHistoryIndex.NgramIndexDdls(tableRef))
+            foreach ((string drop, string create) in
+                ImageHistoryIndex.NgramIndexDdls(tableRef).Concat(ImageHistoryIndex.BtreeIndexDdls(tableRef)))
             {
                 if (refresh)
                 {
@@ -272,7 +273,7 @@ public sealed class DuckDbQueryBackend : IQueryBackend, IDisposable
                 }
                 catch (Exception ex)
                 {
-                    Logs.Debug($"Quarry: image-history NGRAM index build failed: {ex.Message}");
+                    Logs.Debug($"Quarry: image-history scalar index build failed: {ex.Message}");
                 }
             }
         }

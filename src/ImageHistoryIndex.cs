@@ -114,6 +114,17 @@ public static class ImageHistoryIndex
         }
     }
 
+    public static readonly IReadOnlyList<string> BtreeIndexColumns =
+        [.. Schema.Where(c => DuckDbTypeMapper.IsNumeric(c.DdlType)).Select(c => c.Name)];
+
+    public static IEnumerable<(string Drop, string Create)> BtreeIndexDdls(string tableRef)
+    {
+        foreach (string col in BtreeIndexColumns)
+        {
+            yield return ($"DROP INDEX {col}_idx ON {tableRef};", $"CREATE INDEX {col}_idx ON {tableRef} ({col}) USING BTREE;");
+        }
+    }
+
     public static string MergePruneSql(string tableRef, string livePathsJsonLiteral)
         => $"MERGE INTO {tableRef} AS t "
             + $"USING (SELECT {PathColumn} FROM read_json({livePathsJsonLiteral}, format='array', columns={{{PathColumn}: 'VARCHAR'}})) AS s "
