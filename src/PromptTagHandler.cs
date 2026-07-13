@@ -9,10 +9,20 @@ public static class PromptTagHandler
 {
     public const string TagPrefix = "q";
 
+    public const string WildcardSeedPinnedKey = "quarry_wildcard_seed_pinned";
+
     public static void Initialize()
     {
         T2IPromptHandling.PromptTagProcessors[TagPrefix] = Processor;
         T2IPromptHandling.PromptTagLengthEstimators[TagPrefix] = Estimator;
+        T2IParamInput.SpecialParameterHandlers.Add(input =>
+        {
+            if (!input.EarlyLoadDone && input.TryGet(T2IParamTypes.WildcardSeed, out long seed) && seed >= 0)
+            {
+                input.ExtraMeta[WildcardSeedPinnedKey] = true;
+            }
+        });
+        T2IParamInput.LateSpecialParameterHandlers.Add(input => input.ExtraMeta.Remove(WildcardSeedPinnedKey));
     }
 
     private static string Processor(string data, T2IPromptHandling.PromptTagContext context)
@@ -192,14 +202,8 @@ public static class PromptTagHandler
             total += matched[i].Count;
         }
 
-        // Snapshot whether the wildcard seed looks user-pinned BEFORE resolving it below: GetWildcardSeed()
-        // persists the resolved value, so a check afterwards would report "pinned" on every generation.
-        // Gate to the first <q:> tag of the input (used_quarry still empty) so a later tag doesn't observe
-        // the value the first tag just persisted. Best-effort: a core <wildcard> earlier in the prompt can
-        // resolve the seed first.
         bool firstQuarryTag = usedQuarry.Count == 0;
-        bool seedPinned = firstQuarryTag
-            && context.Input.TryGet(T2IParamTypes.WildcardSeed, out long pinnedSeed) && pinnedSeed >= 0;
+        bool seedPinned = firstQuarryTag && context.Input.ExtraMeta.ContainsKey(WildcardSeedPinnedKey);
         WarnAboutRepeats(context, query.Name, total, matched, seedPinned);
 
         bool indexBehavior = context.Input.Get(T2IParamTypes.WildcardSeedBehavior, "Random") == "Index";
