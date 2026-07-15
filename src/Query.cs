@@ -21,6 +21,6 @@ public sealed class Query(string name, IReadOnlyList<QueryClause> clauses, IRead
     public string Name { get; } = name;
     public IReadOnlyList<QueryClause> Clauses { get; } = clauses;
     public IReadOnlyList<string>? PromptColumns { get; } = promptColumns;
-    public string? PromptColumn => PromptColumns is { Count: 1 } ? PromptColumns[0] : null;
+    public string? PromptColumn => PromptColumns is { Count: >= 1 } ? PromptColumns[0] : null;
     public bool HasFilter => Clauses.Count > 0;
 }

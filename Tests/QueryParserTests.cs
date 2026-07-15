@@ -324,7 +324,7 @@ public class QueryParserTests
     {
         Query q = QueryParser.Parse("FOO:full,general");
         Assert.Equal("FOO", q.Name);
-        Assert.Null(q.PromptColumn);
+        Assert.Equal("full", q.PromptColumn);
         Assert.Equal(new[] { "full", "general" }, q.PromptColumns);
     }
 
@@ -333,8 +333,9 @@ public class QueryParserTests
     {
         Query q = QueryParser.Parse("FOO[tags=girl]:full,general");
         Assert.Equal("FOO", q.Name);
-        Assert.Equal("full", q.PromptColumn); // first column via accessor
+        Assert.Equal("full", q.PromptColumn);
         Assert.Equal(new[] { "full", "general" }, q.PromptColumns);
+        Assert.Equal("full", q.PromptColumns[0]);
         QueryClause c = Assert.Single(q.Clauses);
         Assert.Equal("tags", c.Column);
     }
