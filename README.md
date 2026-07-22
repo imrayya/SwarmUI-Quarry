@@ -1,3 +1,42 @@
+# SwarmUI Quarry (Multi-Column Extension)
+
+> **This is a fork of [SwarmUI Quarry](https://github.com/ORIGINAL_AUTHOR/SwarmUI-Quarry)** that adds support for **Multi-Column Selection**. Pull captions, tags, copyright, artists, or sources from the *exact same row* simultaneously using a single tag, complete with full autocomplete and UI preview support!
+
+---
+
+## What's New in This Fork?
+
+In the original Quarry extension, you could pick a custom prompt column using `<q:dataset:column>`. This fork extends that capability so you can **request multiple columns from the same row** in a single wildcard pull, avoiding out-of-sync random selections.
+
+### Highlights & Key Features
+
+* **Multi-Column Tags (`<q:dataset:col1,col2>`):** Pull multiple pieces of metadata from the exact same entry and join them automatically.
+* **Custom Column Separators:** Choose how columns are joined (e.g., `, `, ` | `, newlines `\n`, or custom strings) via `Quarry.json`.
+* **Full Autocomplete Integration:** Type-ahead suggestions now support multi-column chaining—type a comma after your first column override, and SwarmUI will suggest the remaining available columns!
+* **Enhanced UI Preview:** Test and preview multi-column outputs directly inside the **Run Query / Preview** tool.
+
+### Quick Example
+
+Need to combine a character's caption with their copyright info? Instead of rolling two separate tags (which might pick different rows), pull them together:
+
+```text
+<q:danbooru[tags=1girl]:full,copyright>
+```
+Output:
+```text
+highres, solo, official art, 1girl, Genshin Impact
+```
+
+You can even set custom column joiners in your settings `Quarry.json` (located next to your wildcards folder):
+```json
+{
+  "columnSeparator": " | "
+}
+```
+If nothing is set, the default is `", "`.
+
+## Original SwarmUI Quarry Documentation
+
 # SwarmUI Quarry
 
 **Wildcards, but they can filter.**
@@ -148,34 +187,6 @@ The column always comes **last**, after the name list and after any `[ ... ]` fi
 
 If a dataset does not have the column you asked for, Quarry quietly falls back to that dataset's own default prompt column — and it decides **per dataset**. So with `<q:FOO,BAZ:caption>`, if `FOO` has a `caption` column but `BAZ` does not, Quarry reads `FOO`'s `caption` and `BAZ`'s default. A column override never breaks a multi-dataset tag.
 
-### Picking multiple columns: `<q:FOO:col1,col2>`
-
-Need more than one column from the same row? Separate column names with commas after the `:` — Quarry pulls **all of them from the same randomly picked row** and joins them with a comma:
-
-```
-<q:danbooru:full,copyright>          the "full" and "copyright" columns from the same row
-<q:danbooru[tags=1girl]:full,copyright>  same, but only 1girl-tagged rows
-<q:danbooru:prompt,style,source>     three columns from the same row
-```
-
-This is handy when you want to combine metadata with the prompt — say, the caption plus the artist credit, or a description plus a source URL — without spinning up two separate `<q:*>` tags (which would each roll their own random row). The filter still applies to both columns, so you always get a coherent pair.
-
-Want several picks, each with multiple columns? The count syntax works too: `<q[3]:danbooru:full,copyright>` gives you three different rows, each contributing its `full` and `copyright` values.
-
-### Customizing the column separator
-
-By default, multi-column output is joined with `, ` (comma + space). If you prefer something else — ` | `, `\n`, nothing at all — set `columnSeparator` in your `Quarry.json` settings file (located next to your wildcards folder):
-
-```json
-{
-  "datasetsFolder": "...",
-  "columnSeparator": " | ",
-  ...
-}
-```
-
-This affects every multi-column tag in your prompts. The default is `", "`.
-
 ### A few examples
 
 | Tag | What you get |
@@ -192,9 +203,6 @@ This affects every multi-column tag in your prompts. The default is `", "`.
 | `<q:portraits-*[tags=girl]>` | a "girl" from any of your `portraits-*` sets |
 | `<q:midjourney:caption>` | any prompt, read from the `caption` column |
 | `<q:midjourney[tags=girl]:caption>` | a "girl" entry, read from the `caption` column |
-| `<q:danbooru:full,copyright>` | the `full` and `copyright` columns from the same row |
-| `<q:danbooru[tags=1girl]:full,copyright>` | same, filtered to 1girl |
-| `<q[3]:danbooru:full,copyright>` | 3 different rows, each with `full` and `copyright` |
 | `<q[3]:prompts[tags=punk]>` | 3 different punk prompts |
 
 ### Type-ahead suggestions
@@ -205,7 +213,7 @@ You do not have to remember your dataset names. Start typing a Quarry tag in any
 - After `<q:` you get a list of **every dataset**. Keep typing to narrow it.
 - Type a comma and it suggests the **next dataset** for a combined pull (the ones you have already added drop out of the list).
 - With a single dataset, type `[` and it lists **that dataset's columns** to filter on, with its tag columns first — so `<q:characters[` immediately offers `tags`. Once you have picked a column it offers the **operators** (`=` any, `==` all, `!=` none, plus `+=` and `-=` when the column holds numbers); after a `;` it starts over for your next condition.
-- Type `:` (after the name and any `[filter]`) and it lists the **columns you can use as the prompt** — the default prompt column first — for the [`:column` override](#picking-the-prompt-column-qfoobar). You can chain multiple columns with commas: `<q:danbooru:full,` then pick `copyright` to get `<q:danbooru:full,copyright>`. Type `>` to finish.
+- Type `:` (after the name and any `[filter]`) and it lists the **columns you can use as the prompt** — the default prompt column first — for the [`:column` override](#picking-the-prompt-column-qfoobar).
 
 Picking a suggestion leaves the tag open so you can keep going — add another comma, open a `[` filter, or just type `>` to finish.
 
